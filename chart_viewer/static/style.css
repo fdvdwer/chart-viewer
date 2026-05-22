@@ -1,0 +1,4290 @@
+/* ========== Reset / base ========== */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; width: 100%; overflow: hidden; }
+body {
+  background: #131722;
+  color: #d1d4dc;
+  font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei", sans-serif;
+  display: flex; flex-direction: column;
+}
+button { background: none; border: none; color: inherit; cursor: pointer; font: inherit; }
+input, select { background: #1e222d; color: #d1d4dc; border: 1px solid #363a45;
+  padding: 4px 6px; border-radius: 3px; font: inherit; }
+input[type=range] { padding: 0; border: none; }
+.hidden { display: none !important; }
+
+/* ========== Top toolbar ========== */
+#topbar {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0 12px; height: 44px;
+  background: #1e222d; border-bottom: 1px solid #2a2e39;
+  flex-shrink: 0;
+}
+.topbar-left, .topbar-right { display: flex; align-items: center; gap: 8px; }
+.symbol { font-weight: 600; color: #fff; }
+.sep { width: 1px; height: 20px; background: #363a45; margin: 0 4px; }
+.tf-btn, .topbar-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 6px 10px; border-radius: 4px; color: #d1d4dc;
+  transition: background 0.1s;
+}
+.tf-btn:hover, .topbar-btn:hover { background: #2a2e39; }
+.topbar-btn.active { background: #2962ff; color: #fff; }
+.data-range { font-size: 11px; color: #787b86; }
+
+/* ========== Main / left toolbar / chart ========== */
+#main { flex: 1; display: flex; min-height: 0; }
+#leftbar {
+  width: 44px; background: #1e222d; border-right: 1px solid #2a2e39;
+  display: flex; flex-direction: column; align-items: center; padding: 6px 0; gap: 2px;
+  flex-shrink: 0;
+}
+.tool-btn {
+  width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
+  border-radius: 4px; color: #b2b5be;
+}
+.tool-btn:hover { background: #2a2e39; color: #fff; }
+.tool-btn.active { background: #2962ff; color: #fff; }
+.tool-btn.danger:hover { background: #f23645; color: #fff; }
+.leftbar-spacer { flex: 1; }
+
+/* ===== Tool groups (TradingView-style collapsible) =====
+   Each group has one trigger (tool-btn.tool-group-trigger showing all its
+   tool icons, only the last-used one visible via .active) + a popup
+   anchored to the right of the leftbar listing every tool in the group
+   with name + hotkey. Group state managed by drawing.js handlers. */
+.tool-group {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.tool-group-trigger {
+  position: relative;
+}
+.tool-group-trigger svg[data-icon-for] { display: none; }
+.tool-group-trigger svg[data-icon-for].active { display: block; }
+
+.tool-group-popup {
+  position: absolute;
+  left: 100%;
+  top: 0;
+  margin-left: 8px;
+  background: #1e222d;
+  border: 1px solid #2a2e39;
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 200px;
+  z-index: 10000;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6);
+}
+.tool-group-popup.hidden { display: none; }
+.tool-popup-header {
+  padding: 6px 14px;
+  color: #787b86;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid #2a2e39;
+  margin-bottom: 4px;
+}
+.tool-popup-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 14px;
+  background: transparent;
+  border: none;
+  color: #d1d4dc;
+  font-size: 13px;
+  cursor: pointer;
+  gap: 12px;
+  text-align: left;
+}
+.tool-popup-item:hover { background: #2a2e39; }
+.tool-popup-item.active { background: rgba(41, 98, 255, 0.18); color: #fff; }
+.tool-popup-item svg { flex-shrink: 0; }
+.tool-popup-item .popup-tool-name { flex: 1; }
+.tool-popup-item .popup-tool-hotkey {
+  color: #787b86;
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+
+/* chart-area is a vertical flex column so the trade-history drawer
+   (`#sim-history-panel`) can sit as a sibling BELOW the chart. When
+   the drawer opens, the chart shrinks instead of being overlaid —
+   the time axis stays readable. Floating elements inside (quickbar,
+   tickets, fork markers) keep their position: absolute behaviour. */
+#chart-area {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+#chart { flex: 1 1 auto; width: 100%; min-height: 0; }
+
+/* Mini chart panel — flex sibling below #chart, above sim-history.
+   Hidden by default; shown when BranchEngine.miniBranchId is non-null. */
+#mini-chart-panel {
+  flex: 0 0 auto;
+  height: 200px;
+  border-top: 2px solid #2962ff;
+  background: #131722;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#mini-chart-panel[hidden] { display: none; }
+/* Drag handle — thin top strip the user can grab to resize the
+   mini panel vertically. Sits above the header. Hover lights it up
+   so the affordance is discoverable. */
+.mini-chart-resize {
+  flex: 0 0 auto;
+  height: 4px;
+  background: transparent;
+  cursor: ns-resize;
+  position: relative;
+  z-index: 1;
+}
+.mini-chart-resize:hover,
+.mini-chart-resize.dragging {
+  background: #2962ff;
+}
+.mini-chart-header {
+  flex: 0 0 auto;
+  height: 28px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 12px;
+  background: #1e222d;
+  border-bottom: 1px solid #2a2e39;
+  font-size: 12px; color: #d1d4dc;
+}
+.mini-chart-header .mini-pill {
+  display: inline-block; width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--branch-exec, #089981);
+  flex-shrink: 0;
+}
+.mini-chart-header .mini-pill.kind-main      { background: var(--branch-main); }
+.mini-chart-header .mini-pill.kind-exec      { background: var(--branch-exec); }
+.mini-chart-header .mini-pill.kind-direction { background: var(--branch-direction); }
+.mini-chart-header .mini-pill.kind-sandbox   { background: var(--branch-sandbox); }
+.mini-chart-header .mini-pill.kind-archived  { background: var(--branch-archived); }
+.mini-chart-header .mini-name { font-weight: 600; color: #fff; }
+.mini-chart-header .mini-meta { color: #6a7180; font-size: 11px; }
+.mini-chart-header .mini-pnl  {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.mini-chart-header .mini-pnl.pos { color: #26a69a; }
+.mini-chart-header .mini-pnl.neg { color: #ef5350; }
+.mini-chart-header .mini-pnl.zero { color: #6a7180; }
+.mini-chart-header .mini-close {
+  background: transparent; border: none; color: #787b86;
+  cursor: pointer; padding: 0 4px; font-size: 14px;
+  margin-left: 6px;
+}
+.mini-chart-header .mini-close:hover { color: #fff; }
+#mini-chart {
+  flex: 1 1 auto;
+  width: 100%; min-height: 0;
+  position: relative;     /* anchor for the forkbar DOM line */
+}
+/* Vertical line marking where the displayed branch forked from
+   its parent. Color follows the branch's kind so it matches the
+   main-chart ⋎ marker for the same branch (was hardcoded purple
+   before — confused users when the branch wasn't a sandbox).
+   Each `.kind-X` rule overrides --mini-fork-color; the line +
+   glyph then both consume that variable. JS positions `left`
+   each frame from convertToPixel(forkBarTimestamp). */
+.mini-forkbar-line {
+  --mini-fork-color: var(--branch-exec, #089981);
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--mini-fork-color) 60%, transparent);
+  z-index: 5;
+  cursor: help;
+}
+.mini-forkbar-line.kind-main      { --mini-fork-color: var(--branch-main); }
+.mini-forkbar-line.kind-exec      { --mini-fork-color: var(--branch-exec); }
+.mini-forkbar-line.kind-direction { --mini-fork-color: var(--branch-direction); }
+.mini-forkbar-line.kind-sandbox   { --mini-fork-color: var(--branch-sandbox); }
+.mini-forkbar-line.kind-archived  { --mini-fork-color: var(--branch-archived); }
+/* Wider hit-zone so the 1px line is hoverable for the tooltip. */
+.mini-forkbar-line::before {
+  content: '';
+  position: absolute; inset: 0 -3px;
+}
+/* ⋎ glyph at the top of the line — same icon as the main-chart
+   fork markers so users instantly recognise it as "this is where
+   the branch forked from its parent". The glyph is fully opaque so
+   it stays readable while the 1px line below sits at 60% alpha. */
+.mini-forkbar-line .mini-forkbar-glyph {
+  position: absolute;
+  top: -1px; left: 50%;
+  transform: translateX(-50%);
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--mini-fork-color);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px #131722;   /* outline against bg */
+}
+.mini-forkbar-line[hidden] { display: none; }
+
+/* Branch row mini-action buttons (Phase 4) — small chips that appear
+   on row hover or when the branch is currently in the mini slot.
+   Same compact style as state badges. */
+.branch-row .branch-mini-actions {
+  display: flex; gap: 4px; align-items: center;
+  margin-left: 8px;
+}
+.branch-row .branch-mini-btn {
+  background: transparent;
+  border: 1px solid #363a45;
+  color: #b2b5be;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.branch-row:hover .branch-mini-btn { opacity: 1; }
+.branch-row .branch-mini-btn:hover {
+  background: #2a2e39;
+  color: #fff;
+  border-color: #4a4e5a;
+}
+/* When this branch IS the mini, show "移除" button always (so user
+   doesn't have to remember to hover to find the removal action). */
+.branch-row .branch-mini-btn.is-mini { opacity: 1; color: #d1d4dc; }
+
+/* Phase 5: 升格主線 hover button (spec §5.3.2 last row). Hidden
+   until row hover; phase 6 stub action — clicks toast for now.
+   Visually distinct from the 副圖 mini-btn so the user can tell
+   the heavy operation apart from the cheap one. */
+.branch-row .branch-promote-btn {
+  background: transparent;
+  border: 1px solid rgba(239, 83, 80, 0.5);
+  color: #ff8a87;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+.branch-row:hover .branch-promote-btn { opacity: 1; }
+.branch-row .branch-promote-btn:hover {
+  background: rgba(239, 83, 80, 0.18);
+  color: #ffffff;
+  border-color: #ef5350;
+}
+
+/* Phase 5: ephemeral toast — used for phase 6 stub messages. Same
+   visual language as #sim-history-toast but its own DOM node so
+   the two don't fight each other if both fire close in time. */
+#branch-toast {
+  position: fixed;
+  bottom: 32px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1e222d;
+  border: 1px solid #363a45;
+  color: #d1d4dc;
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  z-index: 11000;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+}
+#branch-toast.show { opacity: 1; }
+
+/* ========== Floating quickbar ========== */
+#tool-quickbar {
+  position: absolute; top: 12px; left: 12px;
+  display: flex; align-items: center; gap: 2px;
+  background: #1e222d; border: 1px solid #363a45; border-radius: 4px;
+  padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  z-index: 50;
+}
+.quickbar-handle {
+  color: #555; padding: 0 4px; cursor: grab; user-select: none;
+  font-size: 14px; line-height: 1;
+}
+.quick-btn {
+  width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+  border-radius: 3px; color: #b2b5be;
+}
+.quick-btn:hover { background: #2a2e39; color: #fff; }
+.quick-btn.active { background: #2962ff; color: #fff; }
+
+/* ========== Snap indicator ========== */
+#snap-indicator {
+  position: absolute; top: 12px; right: 80px;
+  background: rgba(41,98,255,0.9); color: #fff;
+  padding: 4px 10px; border-radius: 3px; font-size: 11px; font-weight: 600;
+  letter-spacing: 1px;
+  z-index: 50;
+}
+
+/* ========== Replay bar ========== */
+#replay-bar {
+  position: fixed; bottom: 120px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 6px;
+  background: #1e222d; border: 1px solid #363a45; border-radius: 6px;
+  padding: 6px 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  z-index: 100;
+  cursor: move;            /* hint: grab to drag */
+}
+#replay-bar > * { cursor: auto; }          /* buttons keep default cursor */
+#replay-bar > button { cursor: pointer; }
+#replay-bar > select { cursor: pointer; }
+.replay-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 8px; border-radius: 3px; color: #d1d4dc;
+}
+.replay-btn:hover { background: #2a2e39; }
+.replay-btn.active { background: #2962ff; color: #fff; }
+.replay-btn.close { color: #787b86; }
+.replay-btn.close:hover { color: #f23645; background: transparent; }
+.replay-status { font-size: 11px; color: #787b86; padding: 0 6px; min-width: 110px; }
+#rep-speed, #rep-subtf { padding: 4px 6px; }
+
+/* ========== Object tree panel ========== */
+#obj-tree {
+  position: fixed; top: 56px; right: 12px;
+  width: 280px; max-height: calc(100vh - 80px);
+  background: #1e222d; border: 1px solid #363a45; border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  display: flex; flex-direction: column;
+  z-index: 250;
+}
+#obj-tree header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 14px; border-bottom: 1px solid #2a2e39;
+}
+#obj-tree header .title { font-size: 14px; font-weight: 600; color: #fff; }
+#obj-tree .close-btn {
+  color: #787b86; font-size: 16px; padding: 2px 6px; cursor: pointer;
+}
+#obj-tree .close-btn:hover { color: #fff; }
+#obj-tree .obj-list {
+  flex: 1; overflow-y: auto; padding: 4px 0;
+}
+#obj-tree footer {
+  padding: 8px 12px; border-top: 1px solid #2a2e39;
+}
+.danger-btn {
+  width: 100%; padding: 6px 10px; background: transparent;
+  border: 1px solid #363a45; border-radius: 3px;
+  color: #ef5350; font-size: 12px; cursor: pointer;
+}
+.danger-btn:hover { background: rgba(239,83,80,0.12); border-color: #ef5350; }
+
+.obj-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 14px; font-size: 12px; color: #d1d4dc;
+  cursor: default;
+}
+.obj-row:hover { background: #2a2e39; }
+.obj-row .obj-icon { color: #787b86; flex-shrink: 0; }
+.obj-row .obj-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.obj-row .obj-actions { display: flex; gap: 2px; flex-shrink: 0; }
+.obj-row .icon-btn {
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #787b86; border-radius: 3px; cursor: pointer; background: transparent;
+}
+.obj-row .icon-btn:hover { background: #363a45; color: #fff; }
+.obj-row .icon-btn.danger:hover { color: #ef5350; }
+.obj-row.disabled .obj-name { color: #555; text-decoration: line-through; }
+/* Highlighted when mouse is hovering the corresponding overlay on the chart */
+.obj-row.hover { background: #2a2e39; }
+.obj-row.hover .obj-name,
+.obj-row.hover .obj-icon { color: #2962ff; }
+.obj-row.header-row { color: #787b86; font-weight: 500; cursor: default; }
+.obj-row.header-row:hover { background: transparent; }
+.obj-empty { padding: 20px; text-align: center; color: #555; font-size: 12px; }
+
+/* ========== Timeframe input popup ========== */
+#tf-popup {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 280px; padding: 24px 28px;
+  background: #1e222d; border: 1px solid #363a45; border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.7);
+  z-index: 600; text-align: center;
+  user-select: none;
+}
+.tf-popup-title {
+  color: #d1d4dc; font-size: 16px; font-weight: 600; margin-bottom: 16px;
+}
+.tf-info {
+  display: inline-block; width: 14px; height: 14px;
+  color: #6a7180; font-size: 12px; vertical-align: middle;
+}
+.tf-popup-input {
+  display: flex; align-items: center; justify-content: center;
+  height: 48px; padding: 0 16px;
+  background: #131722; border: 2px solid #2962ff; border-radius: 4px;
+  color: #fff; font-size: 22px; font-weight: 500; letter-spacing: 1px;
+  caret-color: #2962ff;
+}
+.tf-popup-input::after {
+  content: ''; width: 2px; height: 24px; background: #2962ff;
+  margin-left: 2px; animation: tf-caret 1s infinite;
+}
+@keyframes tf-caret { 50% { opacity: 0; } }
+.tf-popup-sub {
+  color: #6a7180; font-size: 13px; margin-top: 10px;
+}
+/* Empty / invalid state — red border + "不適用" sub-text */
+#tf-popup.invalid .tf-popup-input { border-color: #ef5350; }
+#tf-popup.invalid .tf-popup-sub   { color: #ef5350; }
+#tf-popup.invalid .tf-popup-input::after { background: #ef5350; }
+
+/* ========== Right-click context menu ========== */
+#ctx-menu {
+  position: fixed;
+  min-width: 200px;
+  background: #1e222d;
+  border: 1px solid #363a45;
+  border-radius: 6px;
+  padding: 4px 0;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.55);
+  z-index: 500;
+  user-select: none;
+}
+.ctx-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 7px 14px; font-size: 13px; color: #d1d4dc; cursor: pointer;
+}
+.ctx-item:hover { background: #2a2e39; }
+.ctx-item.danger { color: #ef5350; }
+.ctx-item.danger:hover { background: rgba(239,83,80,0.15); }
+.ctx-item.disabled { color: #555; pointer-events: none; }
+.ctx-item .hint { color: #6a7180; font-size: 11px; margin-left: 24px; }
+.ctx-sep { height: 1px; background: #2a2e39; margin: 4px 0; }
+
+/* ========== Chart-area context menu (empty-area right-click) ==========
+   Reuses .ctx-item / .ctx-sep / .hint from the per-overlay menu above. */
+#chart-ctx-menu {
+  position: fixed;
+  min-width: 200px;
+  background: #1e222d;
+  border: 1px solid #363a45;
+  border-radius: 6px;
+  padding: 4px 0;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.55);
+  z-index: 500;
+  user-select: none;
+}
+#chart-ctx-menu .has-submenu { position: relative; }
+#chart-ctx-menu .ctx-arrow { color: #6a7180; font-size: 14px; margin-left: 24px; }
+/* Hover anywhere on the parent OR inside the submenu keeps it open. */
+#chart-ctx-menu .has-submenu:hover .ctx-submenu,
+#chart-ctx-menu .ctx-submenu:hover { display: block; }
+#chart-ctx-menu .ctx-submenu {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: -5px;
+  min-width: 200px;
+  background: #1e222d;
+  border: 1px solid #363a45;
+  border-radius: 6px;
+  padding: 4px 0;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.55);
+}
+/* Keep a 1-px gap so the cursor can travel parent → submenu without
+   losing hover (otherwise the right-edge gap kills the popover). */
+#chart-ctx-menu .has-submenu::after {
+  content: ''; position: absolute; right: -2px; top: 0; width: 4px; height: 100%;
+}
+
+/* ========== Centered modal (chart-settings-modal) ==========
+   The container itself blocks pointer events on the chart underneath
+   (TradingView-style — clicks outside the card are simply absorbed
+   without dimming or auto-closing). No separate backdrop element so
+   header-drag mouseup never lands on a sibling that might synthesize
+   a stray click on the modal container. */
+#chart-settings-modal {
+  position: fixed; inset: 0;
+  z-index: 601;
+}
+#chart-settings-modal.hidden { display: none; }
+/* Top-anchored, horizontally centered (same pattern as the drawing
+   settings panel #settings-panel). When the user switches between
+   sections (商品 / 語言設置) the body height changes — with the top
+   edge fixed, the card grows/shrinks DOWNWARD and the user perceives
+   it as "section content updating in place" instead of the whole
+   card jumping (which is what center-anchoring would cause).
+   _installChartModalDrag snapshots the rect on header mousedown,
+   then switches to explicit left/top so drag math is straightforward.
+   openChartSettingsModal() clears inline styles every open so a
+   dragged-then-closed modal re-opens at the CSS default. */
+#chart-settings-modal .modal-card {
+  position: fixed;
+  top: 80px; left: 50%;
+  transform: translateX(-50%);
+  width: 720px; max-width: 92vw;
+  max-height: min(620px, calc(100vh - 100px));
+  background: #1e222d; border: 1px solid #363a45; border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+  display: flex; flex-direction: column;
+  pointer-events: auto;
+}
+#chart-settings-modal header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 18px; border-bottom: 1px solid #2a2e39;
+  cursor: move; user-select: none;
+}
+#chart-settings-modal .title { font-size: 16px; font-weight: 600; color: #fff; }
+#chart-settings-modal .close-btn {
+  background: transparent; border: none; color: #787b86;
+  font-size: 18px; cursor: pointer; padding: 0 4px;
+}
+#chart-settings-modal .close-btn:hover { color: #fff; }
+#chart-settings-modal .modal-body {
+  display: flex; flex: 1 1 auto; min-height: 0;
+}
+#chart-settings-modal .modal-nav {
+  flex: 0 0 160px; border-right: 1px solid #2a2e39;
+  padding: 12px 0; display: flex; flex-direction: column; gap: 2px;
+}
+#chart-settings-modal .modal-nav-item {
+  padding: 9px 18px; font-size: 13px; color: #b2b5be; cursor: pointer;
+  border-left: 2px solid transparent;
+}
+#chart-settings-modal .modal-nav-item:hover { background: #2a2e39; }
+#chart-settings-modal .modal-nav-item.active {
+  color: #fff; background: #2a2e39; border-left-color: #2962ff;
+}
+#chart-settings-modal .modal-section {
+  flex: 1 1 auto; padding: 18px 22px; overflow-y: auto;
+}
+#chart-settings-modal .modal-section.hidden { display: none; }
+#chart-settings-modal .section-placeholder {
+  color: #6a7180; font-size: 13px; padding: 30px 0;
+}
+#chart-settings-modal .modal-footer {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 12px 18px; border-top: 1px solid #2a2e39;
+}
+#chart-settings-modal .btn-cancel,
+#chart-settings-modal .btn-confirm {
+  height: 32px; padding: 0 18px; border-radius: 4px;
+  font-size: 13px; cursor: pointer; border: 1px solid;
+}
+#chart-settings-modal .btn-cancel {
+  background: transparent; border-color: #4a4a4a; color: #fff;
+}
+#chart-settings-modal .btn-cancel:hover { background: #2a2e39; }
+#chart-settings-modal .btn-confirm {
+  background: #2962ff; border-color: #2962ff; color: #fff;
+}
+#chart-settings-modal .btn-confirm:hover { filter: brightness(1.1); }
+
+/* ---- 商品 section: K-bar + bg color settings ---- */
+#chart-settings-modal .cs-group { margin-bottom: 22px; }
+#chart-settings-modal .cs-group-title {
+  font-size: 13px; color: #d1d4dc; font-weight: 600; margin-bottom: 10px;
+}
+#chart-settings-modal .cs-row {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
+}
+#chart-settings-modal .cs-label {
+  width: 60px; font-size: 13px; color: #b2b5be; flex-shrink: 0;
+}
+/* Checkbox-toggle for the 主體 row (only one with a visibility switch).
+   Borders + wicks always render; the toggle controls whether the candle
+   body fill paints at all (off = transparent, chart bg shows through). */
+#chart-settings-modal .cs-toggle {
+  width: 14px; height: 14px; margin: 0; cursor: pointer; accent-color: #2962ff;
+  flex-shrink: 0;
+}
+/* When a row has a checkbox, the label loses its fixed width so the
+   "主體 / 邊框 / 燭芯" labels still line up across rows. The 4px
+   checkbox + 6px gap roughly matches the lost width. */
+#chart-settings-modal .cs-label-toggle {
+  width: 46px; cursor: pointer; user-select: none;
+}
+#chart-settings-modal .cs-swatch {
+  width: 32px; height: 26px; border: 1px solid #363a45; border-radius: 3px;
+  padding: 0; cursor: pointer; background: #2962ff;
+}
+#chart-settings-modal .cs-swatch:hover { border-color: #5a5e6a; }
+
+/* Template picker (anchored above the section's bottom-left, like
+   drawing-templates trigger). Popover toggled by clicking the button. */
+#chart-settings-modal .cs-tpl-row {
+  position: relative;
+  margin-top: 12px; padding-top: 14px;
+  border-top: 1px solid #2a2e39;
+}
+#chart-settings-modal .cs-tpl-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; height: 30px;
+  background: transparent; color: #fff;
+  border: 1px solid #4a4a4a; border-radius: 3px;
+  cursor: pointer; font-size: 13px;
+}
+#chart-settings-modal .cs-tpl-btn:hover { background: #2a2e39; }
+#chart-settings-modal .cs-tpl-btn .caret { font-size: 10px; color: #787b86; }
+#chart-settings-modal .cs-tpl-popover {
+  position: absolute; bottom: calc(100% + 4px); left: 0;
+  min-width: 180px;
+  background: #1e222d; border: 1px solid #363a45; border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.55);
+  padding: 4px 0;
+  z-index: 10;
+}
+#chart-settings-modal .cs-tpl-popover[hidden] { display: none; }
+#chart-settings-modal .cs-tpl-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 12px; font-size: 13px; color: #d1d4dc; cursor: pointer;
+}
+#chart-settings-modal .cs-tpl-item:hover { background: #2a2e39; }
+#chart-settings-modal .cs-tpl-item .cs-tpl-x {
+  background: transparent; border: none; color: #787b86;
+  font-size: 13px; cursor: pointer; padding: 0 2px;
+  margin-left: 12px;
+}
+#chart-settings-modal .cs-tpl-item .cs-tpl-x:hover { color: #ef5350; }
+#chart-settings-modal .cs-tpl-sep { height: 1px; background: #2a2e39; margin: 4px 0; }
+
+/* ---- 語言設置 section ---- */
+#chart-settings-modal .cs-lang-select {
+  flex: 0 0 auto;
+  min-width: 200px; height: 30px;
+  padding: 0 10px;
+  background: #131722; color: #fff;
+  border: 1px solid #363a45; border-radius: 3px;
+  font-size: 13px; cursor: pointer;
+}
+#chart-settings-modal .cs-lang-select:focus {
+  outline: none; border-color: #2962ff;
+}
+#chart-settings-modal .cs-lang-select option { background: #1e222d; color: #fff; }
+#chart-settings-modal .cs-lang-select option:disabled { color: #6a7180; }
+#chart-settings-modal .cs-lang-hint {
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid #2a2e39;
+  font-size: 11px; color: #787b86; line-height: 1.5;
+}
+
+/* ---- 快捷查看 section ---- */
+#chart-settings-modal .cs-shortcut-group {
+  margin-bottom: 18px;
+}
+#chart-settings-modal .cs-shortcut-group:last-child { margin-bottom: 0; }
+#chart-settings-modal .cs-shortcut-group .cs-group-title {
+  font-size: 13px; font-weight: 600; color: #d1d4dc;
+  margin-bottom: 8px;
+  padding-bottom: 4px; border-bottom: 1px solid #2a2e39;
+}
+#chart-settings-modal .cs-shortcut-row {
+  display: flex; align-items: center;
+  padding: 5px 0;
+  font-size: 12px; color: #b2b5be;
+}
+#chart-settings-modal .cs-shortcut-keys {
+  flex: 0 0 180px;
+  display: flex; align-items: center; gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+#chart-settings-modal .cs-shortcut-desc { flex: 1; }
+#chart-settings-modal .cs-kbd {
+  display: inline-block;
+  min-width: 22px;
+  padding: 2px 7px;
+  background: #131722;
+  border: 1px solid #363a45;
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  color: #d1d4dc;
+  font: 600 11px / 1.3 ui-monospace, "SF Mono", Consolas, monospace;
+  text-align: center;
+}
+#chart-settings-modal .cs-kbd-plus { color: #6a7180; padding: 0 1px; }
+#chart-settings-modal .cs-kbd-or {
+  color: #6a7180; font-size: 11px; padding: 0 4px;
+}
+
+/* ===== Symbol Specs (panel.symspec.*) section =====
+   Lives inside chart-settings-modal as data-section="symspec". Two
+   sub-views: a list view (table of symbols + status badges) and an
+   edit view (per-field form). symbol_settings.js toggles which is
+   visible by adding .hidden to the other. */
+#chart-settings-modal .symspec-hint {
+  color: #b2b5be; font-size: 12px; line-height: 1.55;
+  margin: 0 0 12px 0;
+}
+#chart-settings-modal .symspec-hint-currency {
+  margin-top: 4px; color: #6a7180; font-size: 11px;
+}
+#chart-settings-modal .symspec-history-warn {
+  background: #2a2a16; border: 1px solid #5e571f; border-radius: 3px;
+  color: #ffcb6b; font-size: 12px; padding: 8px 12px;
+  margin: 0 0 14px 0;
+}
+#chart-settings-modal .symspec-table-wrap {
+  border: 1px solid #2a2e39; border-radius: 4px; overflow: hidden;
+}
+#chart-settings-modal .symspec-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+}
+#chart-settings-modal .symspec-table thead th {
+  background: #1e222d; color: #787b86;
+  text-align: left; font-weight: 500;
+  padding: 8px 10px; border-bottom: 1px solid #2a2e39;
+}
+#chart-settings-modal .symspec-table tbody td {
+  padding: 7px 10px; border-bottom: 1px solid #1e222d;
+  color: #d1d4dc;
+}
+#chart-settings-modal .symspec-table tbody tr:last-child td { border-bottom: 0; }
+#chart-settings-modal .symspec-row {
+  cursor: pointer; transition: background 80ms;
+}
+#chart-settings-modal .symspec-row:hover { background: #1e222d; }
+#chart-settings-modal .symspec-cell-symbol {
+  font-weight: 600; color: #fff; font-variant-numeric: tabular-nums;
+}
+#chart-settings-modal .symspec-cell-num,
+#chart-settings-modal .symspec-cell-currency {
+  font-variant-numeric: tabular-nums; text-align: right;
+}
+#chart-settings-modal .symspec-cell-status { text-align: right; }
+#chart-settings-modal .symspec-status {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; line-height: 1.4;
+}
+#chart-settings-modal .symspec-status.is-builtin  { background: #1e2a36; color: #8ab4f8; }
+#chart-settings-modal .symspec-status.is-override { background: #1e3a2a; color: #6cd17a; }
+#chart-settings-modal .symspec-status.is-unknown  { background: #3a1e1e; color: #ff8a80; }
+#chart-settings-modal .symspec-row.is-unknown .symspec-cell-symbol { color: #ff8a80; }
+
+/* Edit view */
+#chart-settings-modal .symspec-back {
+  background: transparent; border: 0; color: #8ab4f8;
+  font-size: 12px; cursor: pointer; padding: 0 0 6px 0;
+}
+#chart-settings-modal .symspec-back:hover { text-decoration: underline; }
+#chart-settings-modal .symspec-edit-title {
+  margin: 0 0 10px 0; font-size: 16px; font-weight: 600; color: #fff;
+}
+#chart-settings-modal .symspec-form { display: grid; gap: 10px; }
+#chart-settings-modal .symspec-row {
+  display: grid; grid-template-columns: 130px 1fr; align-items: center; gap: 12px;
+}
+/* The list-view row class collides with the edit-form .symspec-row;
+   override above for the form context only. Lists live inside .symspec-list. */
+#chart-settings-modal .symspec-list .symspec-row {
+  display: table-row; grid-template-columns: unset;
+}
+#chart-settings-modal .symspec-form > .symspec-row > label {
+  color: #b2b5be; font-size: 12px;
+}
+#chart-settings-modal .symspec-input {
+  height: 30px; padding: 0 10px;
+  background: #131722; color: #fff;
+  border: 1px solid #2a2e39; border-radius: 3px;
+  font-size: 13px; box-sizing: border-box;
+}
+#chart-settings-modal .symspec-input:focus {
+  outline: none; border-color: #2962ff;
+}
+#chart-settings-modal .symspec-edit-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin-top: 14px; padding-top: 14px;
+  border-top: 1px solid #2a2e39;
+}
+#chart-settings-modal .symspec-edit-actions .btn-cancel:disabled {
+  opacity: 0.4; cursor: not-allowed;
+}
+
+/* ========== Shortcuts reference window ==========
+   Standalone draggable window opened from 設定 → 快捷查看. Wider
+   (820px) than the settings modal so the 8 groups can fit in a 2-
+   column grid without vertical scrolling on most viewports. Body
+   is `overflow-y: auto` so mouse-wheel still works on shorter
+   screens. Same drag handler as chart-settings — header has
+   `cursor: move`; clicking + dragging it pins the card via inline
+   left/top + transform: none. */
+#shortcuts-window {
+  position: fixed; inset: 0;
+  z-index: 700;     /* above chart-settings-modal (601) */
+  pointer-events: none;
+}
+#shortcuts-window.hidden { display: none; }
+#shortcuts-window .sw-card {
+  position: fixed;
+  top: 80px; left: 50%;
+  transform: translateX(-50%);
+  width: 820px; max-width: 94vw;
+  max-height: min(620px, calc(100vh - 100px));
+  background: #1e222d; border: 1px solid #363a45; border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+  display: flex; flex-direction: column;
+  pointer-events: auto;
+}
+#shortcuts-window header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 18px; border-bottom: 1px solid #2a2e39;
+  cursor: move; user-select: none;
+}
+#shortcuts-window .title { font-size: 16px; font-weight: 600; color: #fff; }
+#shortcuts-window .close-btn {
+  background: transparent; border: none; color: #787b86;
+  font-size: 18px; cursor: pointer; padding: 0 4px;
+}
+#shortcuts-window .close-btn:hover { color: #fff; }
+#shortcuts-window .sw-body {
+  flex: 1 1 auto;
+  padding: 18px 22px;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 32px;     /* row gap is small (groups manage their own spacing) */
+  align-content: start;
+}
+#shortcuts-window .cs-shortcut-group {
+  margin-bottom: 14px;
+  break-inside: avoid;     /* keep a group together if browser supports it */
+}
+#shortcuts-window .cs-group-title {
+  font-size: 13px; font-weight: 600; color: #d1d4dc;
+  margin-bottom: 8px;
+  padding-bottom: 4px; border-bottom: 1px solid #2a2e39;
+}
+#shortcuts-window .cs-shortcut-row {
+  display: flex; align-items: center;
+  padding: 5px 0;
+  font-size: 12px; color: #b2b5be;
+}
+#shortcuts-window .cs-shortcut-keys {
+  flex: 0 0 150px;
+  display: flex; align-items: center; gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+#shortcuts-window .cs-shortcut-desc { flex: 1; }
+#shortcuts-window .cs-kbd {
+  display: inline-block;
+  min-width: 22px;
+  padding: 2px 7px;
+  background: #131722;
+  border: 1px solid #363a45;
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  color: #d1d4dc;
+  font: 600 11px / 1.3 ui-monospace, "SF Mono", Consolas, monospace;
+  text-align: center;
+}
+#shortcuts-window .cs-kbd-plus { color: #6a7180; padding: 0 1px; }
+#shortcuts-window .cs-kbd-or  { color: #6a7180; font-size: 11px; padding: 0 4px; }
+
+/* ========== Settings panel ========== */
+#settings-panel {
+  position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
+  width: 320px; max-height: calc(100vh - 80px);
+  background: #1e222d; border: 1px solid #363a45; border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  display: flex; flex-direction: column;
+  z-index: 200;
+}
+#settings-panel header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 16px; border-bottom: 1px solid #2a2e39;
+  cursor: move; user-select: none;
+}
+#settings-panel .title { font-size: 15px; font-weight: 600; color: #fff; }
+#settings-panel .close-btn { color: #787b86; font-size: 18px; }
+#settings-panel .close-btn:hover { color: #fff; }
+#settings-panel .tabs {
+  display: flex; gap: 4px; padding: 0 12px; border-bottom: 1px solid #2a2e39;
+}
+#settings-panel .tab {
+  padding: 10px 12px; color: #787b86; border-bottom: 2px solid transparent;
+}
+#settings-panel .tab.active { color: #fff; border-bottom-color: #2962ff; }
+.tab-body { padding: 16px; flex: 1; overflow-y: auto; position: relative; }
+.tab-body .row {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 14px;
+}
+.tab-body .row label:not(:has(input)) { width: 60px; color: #b2b5be; flex-shrink: 0; }
+/* Color swatch (anchor button) */
+.color-swatch {
+  width: 64px; height: 26px; border: 1px solid #363a45; border-radius: 3px;
+  background: #2962ff; cursor: pointer; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.color-swatch::after {
+  content: '▾'; color: rgba(255,255,255,0.7); font-size: 11px;
+  margin-left: auto; padding-right: 6px;
+}
+/* Muted state when the associated feature (e.g. 框線) is toggled off. */
+.color-swatch.disabled {
+  opacity: 0.35;
+  cursor: default;
+  filter: grayscale(0.5);
+}
+.color-swatch.disabled::after { color: rgba(255,255,255,0.3); }
+
+/* Color popover — fixed-positioned, anchored to the swatch button via JS */
+.color-popover {
+  position: fixed; width: 280px;
+  background: #1e222d; border: 1px solid #363a45; border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+  /* Has to sit ABOVE both the regular settings panel and the position
+     overlay dialog (both are .settings-popover, z-index 10100) — without
+     this the popover renders behind whichever dialog opened it. */
+  padding: 12px; z-index: 10200;
+}
+.color-grid {
+  display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px;
+}
+.color-cell {
+  width: 100%; aspect-ratio: 1; border-radius: 3px; cursor: pointer;
+  border: 1px solid transparent; transition: transform 0.05s;
+}
+.color-cell:hover { transform: scale(1.15); }
+.color-cell.active { border-color: #fff; box-shadow: 0 0 0 1px #2962ff; }
+.color-custom-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.color-custom-row label { color: #787b86; font-size: 12px; }
+.color-custom-row input[type=color] {
+  width: 50px; height: 26px; padding: 0; border: 1px solid #363a45;
+  border-radius: 3px; background: transparent; cursor: pointer;
+}
+
+/* Opacity slider (gradient track) */
+.opacity-slider {
+  flex: 1; height: 6px; -webkit-appearance: none; appearance: none;
+  background: linear-gradient(to right, transparent, #2962ff);
+  border: none; border-radius: 3px; outline: none;
+}
+.opacity-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; border: 1px solid #2962ff; cursor: pointer;
+}
+#sp-opacity-val { color: #d1d4dc; font-size: 12px; min-width: 40px; text-align: right; }
+
+/* Thickness button group */
+.thickness-group { display: flex; gap: 4px; }
+.th-btn {
+  width: 36px; height: 26px; padding: 0; background: #2a2e39; border-radius: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.th-btn:hover { background: #363a45; }
+.th-btn.active { background: #2962ff; }
+.th-line { width: 22px; background: #d1d4dc; }
+
+/* Line-style button group */
+.line-style-group { display: flex; gap: 4px; }
+.ls-btn {
+  width: 50px; height: 26px; padding: 0; background: #2a2e39; border-radius: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.ls-btn:hover { background: #363a45; }
+.ls-btn.active { background: #2962ff; }
+.ls-preview { width: 26px; height: 1.5px; }
+.ls-preview.solid  { background: #d1d4dc; }
+.ls-preview.dashed {
+  background-image: linear-gradient(to right, #d1d4dc 60%, transparent 60%);
+  background-size: 5px 100%; background-repeat: repeat-x;
+}
+.ls-preview.dotted {
+  background-image: linear-gradient(to right, #d1d4dc 64%, transparent 64%);
+  background-size: 11px 100%; background-repeat: repeat-x;
+}
+
+/* Footer template dropdown */
+.sp-actions { display: flex; gap: 8px; }
+.tpl-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 6px 10px; background: #2a2e39; border: 1px solid #363a45;
+  border-radius: 3px; color: #d1d4dc; font-size: 12px; cursor: pointer;
+}
+.tpl-btn:hover { background: #363a45; }
+.tpl-btn .chevron { color: #787b86; font-size: 10px; }
+
+/* Template popover */
+#sp-template-pop {
+  position: fixed;
+  min-width: 180px; max-height: 380px; overflow-y: auto;
+  background: #1e222d; border: 1px solid #363a45; border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+  padding: 4px 0;
+  z-index: 400;
+}
+.tpl-item {
+  padding: 7px 14px; font-size: 12px; color: #d1d4dc;
+  cursor: pointer; user-select: none;
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+}
+.tpl-item:hover { background: #2a2e39; }
+.tpl-action { color: #d1d4dc; }
+.tpl-sep { height: 1px; background: #2a2e39; margin: 4px 0; }
+.tpl-item .tpl-del {
+  color: #6a7180; cursor: pointer;
+  visibility: hidden; font-size: 14px; line-height: 1;
+}
+.tpl-item:hover .tpl-del { visibility: visible; }
+.tpl-item .tpl-del:hover { color: #ef5350; }
+.tpl-empty { padding: 12px 14px; color: #555; font-size: 12px; text-align: center; }
+
+/* Save-as modal */
+#tpl-save-modal {
+  position: fixed; inset: 0; z-index: 600;
+  display: flex; align-items: center; justify-content: center;
+}
+.tpl-modal-backdrop {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.5);
+}
+.tpl-modal-content {
+  position: relative;
+  width: 360px; background: #1e222d; border: 1px solid #363a45;
+  border-radius: 6px; box-shadow: 0 10px 40px rgba(0,0,0,0.7);
+  padding: 0 0 16px;
+}
+.tpl-modal-content header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 18px 0;
+}
+.tpl-modal-content header .title {
+  font-size: 16px; font-weight: 600; color: #fff;
+}
+.tpl-modal-content header .close-btn {
+  background: none; border: none; color: #787b86; font-size: 18px; cursor: pointer;
+}
+.tpl-modal-content header .close-btn:hover { color: #fff; }
+.tpl-label {
+  display: block; padding: 16px 18px 6px; color: #b2b5be; font-size: 12px;
+}
+.tpl-name-row {
+  display: flex; margin: 0 18px; position: relative;
+}
+.tpl-name-row input {
+  flex: 1; background: #131722; border: 1.5px solid #2962ff;
+  border-radius: 3px; color: #fff; padding: 8px 32px 8px 10px;
+  font: inherit; outline: none;
+}
+.tpl-name-chevron {
+  position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; color: #787b86; cursor: pointer;
+  width: 28px; height: 28px; font-size: 14px;
+}
+.tpl-name-chevron:hover { color: #fff; }
+.tpl-name-existing {
+  margin: 4px 18px 0; max-height: 200px; overflow-y: auto;
+  background: #1e222d; border: 1px solid #363a45; border-radius: 3px;
+}
+.tpl-name-existing .tpl-item { padding: 7px 12px; }
+.tpl-modal-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 16px 18px 0;
+}
+.tpl-modal-actions button {
+  padding: 6px 16px; border-radius: 3px; background: #2a2e39;
+  border: none; color: #d1d4dc; font: inherit; cursor: pointer;
+}
+.tpl-modal-actions button.primary { background: #2962ff; color: #fff; }
+.tpl-modal-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+.tpl-modal-actions button:not(:disabled):hover { filter: brightness(1.15); }
+#settings-panel footer {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 12px 16px; border-top: 1px solid #2a2e39;
+}
+#settings-panel footer button {
+  padding: 6px 16px; border-radius: 3px; background: #2a2e39; color: #d1d4dc;
+}
+#settings-panel footer button.primary { background: #2962ff; color: #fff; }
+#settings-panel footer button:hover { filter: brightness(1.15); }
+
+/* ===== Text tab controls ===== */
+.sp-text-controls { gap: 8px; }
+.sp-select {
+  background: #1e222d; color: #d1d4dc; border: 1px solid #2a2e39;
+  border-radius: 3px; padding: 4px 8px; font-size: 13px; outline: none;
+}
+.sp-select:focus { border-color: #2962ff; }
+.sp-toggle-btn {
+  width: 30px; height: 28px; background: #2a2e39; color: #d1d4dc;
+  border-radius: 3px; display: inline-flex; align-items: center;
+  justify-content: center; font-size: 14px;
+}
+.sp-toggle-btn:hover { background: #363a45; }
+.sp-toggle-btn.active { background: #2962ff; color: #fff; }
+.sp-textarea {
+  width: 100%; min-height: 64px; resize: vertical;
+  background: #1e222d; color: #d1d4dc; border: 1px solid #2a2e39;
+  border-radius: 3px; padding: 6px 8px; font-size: 13px;
+  font-family: inherit; outline: none; box-sizing: border-box;
+}
+.sp-textarea:focus { border-color: #2962ff; }
+
+/* ===== Symbol search dialog ===== */
+#symbol-search {
+  position: fixed; inset: 0; z-index: 2000;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 12vh;
+}
+.symbol-backdrop {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.5);
+}
+.symbol-modal {
+  position: relative;
+  width: 560px; max-width: 90vw;
+  background: #1e222d; color: #d1d4dc;
+  border: 1px solid #2a2e39; border-radius: 6px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+  display: flex; flex-direction: column;
+  max-height: 70vh;
+}
+.symbol-modal header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 18px; border-bottom: 1px solid #2a2e39;
+}
+.symbol-modal .title { font-size: 15px; font-weight: 600; color: #fff; }
+.symbol-modal .close-btn {
+  background: transparent; border: none; color: #787b86;
+  font-size: 18px; cursor: pointer; padding: 4px 8px;
+}
+.symbol-modal .close-btn:hover { color: #fff; }
+.symbol-input-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px; border-bottom: 1px solid #2a2e39;
+  color: #787b86;
+}
+#sym-input {
+  flex: 1; background: transparent; border: none; outline: none;
+  color: #fff; font-size: 15px; font-family: inherit;
+}
+#sym-input::placeholder { color: #5a5e6a; }
+.symbol-list {
+  flex: 1; overflow-y: auto; padding: 4px 0;
+}
+.sym-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 18px;
+  cursor: pointer; user-select: none;
+}
+.sym-item:hover,
+.sym-item.active {
+  background: #2a2e39;
+}
+.sym-item .sym-code { color: #fff; font-weight: 600; font-size: 14px; min-width: 80px; }
+.sym-item .sym-desc { color: #787b86; font-size: 13px; flex: 1; }
+.sym-item .sym-source { color: #5a5e6a; font-size: 12px; }
+.sym-empty {
+  text-align: center; color: #5a5e6a; padding: 24px;
+  font-size: 13px;
+}
+.symbol.clickable {
+  cursor: pointer;
+}
+.symbol.clickable:hover {
+  color: #2962ff;
+}
+
+/* ===== Layout tab bar (browser-style) ===== */
+#tab-bar {
+  flex-shrink: 0;
+  display: flex; align-items: flex-end;
+  height: 34px;
+  background: #131722;
+  padding: 0 4px;
+  border-bottom: 1px solid #2a2e39;
+  gap: 2px;
+  overflow: hidden;
+}
+.tabs-scroll {
+  flex: 1; display: flex; align-items: flex-end;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs-scroll::-webkit-scrollbar { display: none; }
+.tab {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 10px 0 12px;
+  background: #1e222d;
+  color: #787b86;
+  border: 1px solid #2a2e39; border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 220px;
+  min-width: 80px;
+  transition: background 0.12s, color 0.12s;
+}
+.tab:hover { background: #2a2e39; color: #d1d4dc; }
+.tab.active {
+  background: #1e222d; color: #fff;
+  border-color: #363a45;
+  position: relative;
+  z-index: 1;
+  box-shadow: 0 -2px 0 #2962ff inset;
+}
+.tab .tab-label {
+  flex: 1; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+  font-weight: 500;
+}
+.tab .tab-close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 3px;
+  color: #787b86; background: transparent; border: none;
+  font-size: 14px; line-height: 1;
+  cursor: pointer; flex-shrink: 0;
+}
+.tab .tab-close:hover { background: #363a45; color: #fff; }
+.tab-add {
+  flex: 0 0 auto;
+  width: 28px; height: 28px;
+  background: transparent; color: #787b86;
+  border: none; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+}
+.tab-add:hover { background: #2a2e39; color: #fff; }
+
+/* ===== Layouts home screen ===== */
+#layouts-home {
+  position: fixed; inset: 0; z-index: 1000;
+  background: #131722;
+  overflow-y: auto;
+  padding: 48px 24px;
+}
+.lh-inner {
+  max-width: 1100px; margin: 0 auto;
+}
+.lh-title {
+  color: #fff; font-size: 28px; font-weight: 700; margin-bottom: 24px;
+}
+.lh-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+.lh-card {
+  background: #1e222d;
+  border: 1px solid #2a2e39;
+  border-radius: 8px;
+  padding: 20px 20px 16px;
+  color: #d1d4dc;
+  text-align: left;
+  position: relative;
+  min-height: 120px;
+  transition: background 0.1s, border-color 0.1s;
+  display: flex; flex-direction: column;
+  cursor: pointer;
+}
+.lh-card:hover { background: #2a2e39; border-color: #363a45; }
+.lh-new {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px;
+  color: #787b86; font-size: 15px; font-weight: 500;
+  border-style: dashed;
+}
+.lh-new:hover { color: #fff; }
+.lh-card .lh-fav {
+  position: absolute; top: 12px; left: 14px;
+  color: #787b86; font-size: 18px;
+  background: transparent; border: none; cursor: pointer;
+}
+.lh-card .lh-fav:hover { color: #fff; }
+.lh-card .lh-menu {
+  position: absolute; top: 10px; right: 10px;
+  color: #787b86; background: transparent; border: none; cursor: pointer;
+  padding: 4px; border-radius: 3px;
+  display: flex; align-items: center; justify-content: center;
+}
+.lh-card .lh-menu:hover { color: #fff; background: #363a45; }
+
+/* Floating popup menu anchored to the ⋮ button */
+.lh-menu-pop {
+  position: fixed; z-index: 2500;
+  background: #1e222d;
+  border: 1px solid #2a2e39;
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.6);
+  min-width: 180px;
+  padding: 4px 0;
+}
+.lh-menu-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px;
+  color: #d1d4dc; font-size: 13px;
+  cursor: pointer; user-select: none;
+}
+.lh-menu-item:hover { background: #2a2e39; color: #fff; }
+.lh-menu-item.lh-menu-danger { color: #f23645; }
+.lh-menu-item.lh-menu-danger:hover { background: rgba(242,54,69,0.12); color: #f23645; }
+.lh-card .lh-name {
+  color: #fff; font-size: 16px; font-weight: 600; margin-top: 18px;
+}
+.lh-card .lh-sub {
+  color: #787b86; font-size: 12px; margin-top: 4px;
+}
+
+/* ===== Layout name dialog ===== */
+#layout-name-dialog {
+  position: fixed; inset: 0; z-index: 2200;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 18vh;
+}
+.lnd-backdrop {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.55);
+}
+.lnd-modal {
+  position: relative;
+  width: 420px; max-width: 90vw;
+  background: #1e222d; color: #d1d4dc;
+  border: 1px solid #2a2e39; border-radius: 8px;
+  padding: 20px 24px 16px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.7);
+}
+.lnd-modal header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 14px;
+}
+.lnd-modal .title { color: #fff; font-size: 17px; font-weight: 600; }
+.lnd-modal .close-btn {
+  background: transparent; border: none; color: #787b86;
+  font-size: 20px; cursor: pointer; padding: 0 4px;
+}
+.lnd-modal .close-btn:hover { color: #fff; }
+.lnd-label { display: block; color: #b2b5be; font-size: 13px; margin-bottom: 6px; }
+#lnd-input {
+  width: 100%; padding: 10px 12px;
+  background: #131722; color: #fff;
+  border: 2px solid #2962ff; border-radius: 4px;
+  font-size: 14px; outline: none;
+  box-sizing: border-box;
+}
+.lnd-actions {
+  margin-top: 18px;
+  display: flex; justify-content: flex-end; gap: 10px;
+}
+.lnd-actions button {
+  padding: 7px 18px; border-radius: 4px;
+  font-size: 13px; cursor: pointer;
+}
+.lnd-actions .rd-primary:disabled {
+  background: #3a3e4a; color: #787b86; cursor: not-allowed;
+}
+
+/* ===== Replay exit / continue dialog (TV-style) ===== */
+#replay-dialog {
+  position: fixed; inset: 0; z-index: 2100;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 18vh;
+}
+.rd-backdrop {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.55);
+}
+.rd-modal {
+  position: relative;
+  width: 440px; max-width: 90vw;
+  background: #1e222d; color: #d1d4dc;
+  border: 1px solid #2a2e39; border-radius: 8px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.7);
+  padding: 20px 24px 16px;
+}
+.rd-modal header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 12px;
+}
+.rd-modal .title {
+  font-size: 17px; font-weight: 600; color: #fff;
+}
+.rd-modal .close-btn {
+  background: transparent; border: none; color: #787b86;
+  font-size: 20px; cursor: pointer; padding: 0 4px;
+}
+.rd-modal .close-btn:hover { color: #fff; }
+.rd-body {
+  color: #b2b5be; font-size: 13px; line-height: 1.6;
+  margin-bottom: 16px;
+}
+.rd-options {
+  margin-bottom: 16px;
+  font-size: 13px; color: #d1d4dc;
+}
+.rd-options label {
+  display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+}
+.rd-options input[type=checkbox] { cursor: pointer; }
+.rd-actions {
+  display: flex; justify-content: flex-end; gap: 10px;
+}
+.rd-actions button {
+  padding: 7px 18px; border-radius: 4px;
+  font-size: 13px; cursor: pointer;
+  transition: background 0.1s;
+}
+.rd-secondary {
+  background: transparent; color: #d1d4dc; border: 1px solid #363a45;
+}
+.rd-secondary:hover { background: #2a2e39; }
+.rd-primary {
+  background: #fff; color: #131722; border: none; font-weight: 500;
+}
+.rd-primary:hover { filter: brightness(0.92); }
+
+/* ===== Replay pick-mode visual feedback ===== */
+/* Scissor cursor — 24×24 SVG inlined as data-URL. 12,12 hotspot = tip. */
+.replay-picking, .replay-picking * {
+  cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%232962ff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><circle cx='6' cy='6' r='3'/><circle cx='6' cy='18' r='3'/><line x1='20' y1='4' x2='8.12' y2='15.88'/><line x1='14.47' y1='14.48' x2='20' y2='20'/><line x1='8.12' y1='8.12' x2='12' y2='12'/></svg>") 12 12, crosshair !important;
+}
+/* Vertical indicator line that follows the mouse while picking */
+.pick-line {
+  position: absolute;
+  top: 0; bottom: 0; width: 2px;
+  background: #2962ff;
+  pointer-events: none;
+  z-index: 200;
+  transform: translateX(-1px);
+}
+/* Dim overlay covering bars to the right of the cursor — matches TradingView */
+.pick-dim {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: rgba(19, 23, 34, 0.6);
+  pointer-events: none;
+  z-index: 199;
+}
+
+/* ===== Onboarding overlay (shown on first run when market_data/ is empty) ===== */
+#onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 13, 20, 0.88);
+  backdrop-filter: blur(4px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+}
+#onboarding-overlay.hidden {
+  display: none;
+}
+.onboarding-card {
+  position: relative;       /* anchor for .onboarding-lang absolute positioning */
+  width: min(560px, 92vw);
+  background: #1e222d;
+  border: 1px solid #2a2e39;
+  border-radius: 14px;
+  padding: 36px 32px 28px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  color: #d1d4dc;
+  text-align: center;
+}
+/* Top-right language picker — small, unobtrusive. Lets a Chinese-
+   speaking user landing on the empty-data overlay flip to zh without
+   opening Settings (which is unreachable while the overlay is up). */
+.onboarding-lang {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+}
+.onboarding-lang select.cs-lang-select {
+  background: #131722;
+  color: #d1d4dc;
+  border: 1px solid #2a2e39;
+  border-radius: 4px;
+  padding: 4px 24px 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+}
+.onboarding-lang select.cs-lang-select:hover {
+  border-color: #4a4a4a;
+}
+.onboarding-lang select.cs-lang-select:focus {
+  border-color: #2962ff;
+}
+.onboarding-icon {
+  font-size: 48px;
+  line-height: 1;
+  margin-bottom: 14px;
+}
+.onboarding-card h2 {
+  margin: 0 0 10px;
+  font-size: 20px;
+  font-weight: 600;
+  color: #eaecef;
+}
+.onboarding-sub {
+  margin: 0 0 18px;
+  font-size: 14px;
+  color: #9aa0b0;
+}
+.onboarding-sub code {
+  background: #2a2e39;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #d1d4dc;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12.5px;
+}
+.onboarding-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #131722;
+  border: 1px solid #2a2e39;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  text-align: left;
+}
+.onboarding-path code {
+  flex: 1;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  color: #d1d4dc;
+  word-break: break-all;
+  background: transparent;
+  padding: 0;
+}
+.onboarding-path button {
+  flex-shrink: 0;
+  background: #2a2e39;
+  border: none;
+  color: #d1d4dc;
+  padding: 6px 12px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.onboarding-path button:hover { background: #363a45; }
+.onboarding-path button.copied { background: #2962ff; color: #fff; }
+.onboarding-hint {
+  font-size: 12.5px;
+  color: #787b86;
+  margin: 0 0 22px;
+  line-height: 1.6;
+}
+.onboarding-hint code {
+  background: #2a2e39;
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: #d1d4dc;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+.onboarding-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.onboarding-actions button {
+  background: #2a2e39;
+  border: 1px solid #363a45;
+  color: #d1d4dc;
+  padding: 10px 18px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.onboarding-actions button:hover { background: #363a45; }
+.onboarding-actions button.btn-primary {
+  background: #2962ff;
+  border-color: #2962ff;
+  color: #fff;
+}
+.onboarding-actions button.btn-primary:hover { background: #1e53e5; }
+.onboarding-status {
+  margin-top: 16px;
+  min-height: 18px;
+  font-size: 13px;
+  color: #787b86;
+}
+.onboarding-status.success { color: #26a69a; }
+.onboarding-status.error { color: #ef5350; }
+
+/* CSV format spec collapsible section. Defaults to open per user
+   onboarding feedback ("first-time visitors don't know what columns
+   to put in"). */
+.onboarding-format {
+  margin: 0 0 22px;
+  text-align: left;
+  background: #1a1d24;
+  border: 1px solid #2a2e39;
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+.onboarding-format > summary {
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: #d1d4dc;
+  outline: none;
+  padding: 2px 0;
+}
+.onboarding-format > summary::marker { color: #787b86; }
+.onboarding-csv {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  background: #0d1017;
+  border: 1px solid #2a2e39;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-family: Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #d1d4dc;
+}
+.onboarding-csv code { background: none; padding: 0; }
+.onboarding-format-notes {
+  margin: 0;
+  padding: 0 0 0 18px;
+  font-size: 12px;
+  color: #b8bbc4;
+  line-height: 1.7;
+}
+.onboarding-format-notes li { margin: 0; }
+.onboarding-format-notes code {
+  background: #2a2e39;
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: #d1d4dc;
+  font-family: Consolas, monospace;
+  font-size: 11.5px;
+}
+
+/* ===== Centered loading modal (scan / reload / etc.) ===== */
+#loading-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 13, 20, 0.55);
+  backdrop-filter: blur(2px);
+  z-index: 10050;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#loading-modal.hidden { display: none; }
+.loading-card {
+  background: #1e222d;
+  border: 1px solid #2a2e39;
+  border-radius: 12px;
+  padding: 30px 42px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  color: #d1d4dc;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+  font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+}
+.loading-text {
+  font-size: 14px;
+  color: #d1d4dc;
+  letter-spacing: 0.5px;
+  text-align: center;
+  white-space: pre-line;
+  line-height: 1.5;
+  max-width: 320px;
+  word-break: break-all;
+}
+
+/* 6-box horizontal scale wave — pure CSS, no JS. Inspired by SpinKit (MIT). */
+.loader-wave {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  height: 22px;
+}
+.loader-wave span {
+  width: 10px;
+  height: 10px;
+  background: #2962ff;
+  border-radius: 2px;
+  animation: loader-wave 1.1s ease-in-out infinite;
+}
+.loader-wave span:nth-child(1) { animation-delay: -0.50s; }
+.loader-wave span:nth-child(2) { animation-delay: -0.40s; }
+.loader-wave span:nth-child(3) { animation-delay: -0.30s; }
+.loader-wave span:nth-child(4) { animation-delay: -0.20s; }
+.loader-wave span:nth-child(5) { animation-delay: -0.10s; }
+.loader-wave span:nth-child(6) { animation-delay:  0.00s; }
+@keyframes loader-wave {
+  0%, 60%, 100% { transform: scale(0.6); opacity: 0.45; }
+  30%          { transform: scale(1.4); opacity: 1;    }
+}
+
+/* ===== Top-of-screen toast (brief status messages) ===== */
+#toast {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1e222d;
+  border: 1px solid #2a2e39;
+  border-radius: 8px;
+  padding: 10px 18px;
+  color: #d1d4dc;
+  font-size: 13px;
+  z-index: 10060;
+  opacity: 1;
+  transition: opacity 0.25s, transform 0.25s;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+}
+#toast.hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -8px);
+}
+#toast.success { border-left: 3px solid #26a69a; }
+#toast.error   { border-left: 3px solid #ef5350; }
+
+/* Small icon-only button used in dialog headers (e.g. SymSearch rescan). */
+.icon-btn {
+  background: transparent;
+  border: none;
+  color: #9aa0b0;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+.icon-btn:hover { background: #2a2e39; color: #d1d4dc; }
+.icon-btn:disabled { opacity: 0.4; cursor: wait; }
+
+/* ===== Position-tool settings popover (gear icon → modal) ===== */
+.settings-popover {
+  position: fixed;
+  /* Default: centered horizontally + pinned to a stable top so switching
+     between tabs of different heights doesn't make the dialog "jump"
+     vertically the way translate(-50%, -50%) does. The header is dragged
+     by JS to override these values once the user moves the dialog. */
+  top: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(380px, 92vw);
+  background: #1e222d;
+  border: 1px solid #2a2e39;
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  color: #d1d4dc;
+  font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+  z-index: 10100;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.settings-popover header {
+  cursor: move;
+}
+.settings-popover.hidden { display: none; }
+.settings-popover header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #2a2e39;
+}
+.settings-popover header .title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #eaecef;
+}
+.settings-popover header .close-btn {
+  background: transparent;
+  border: none;
+  color: #9aa0b0;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.settings-popover header .close-btn:hover { background: #2a2e39; color: #d1d4dc; }
+.settings-popover .row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+}
+.settings-popover .row label {
+  flex: 0 0 110px;
+  color: #b2b5be;
+  font-size: 13px;
+}
+.settings-popover .row input[type="number"],
+.settings-popover .row select {
+  flex: 1;
+  background: #131722;
+  border: 1px solid #2a2e39;
+  color: #d1d4dc;
+  border-radius: 5px;
+  padding: 6px 8px;
+  font-size: 13px;
+  outline: none;
+}
+.settings-popover .row input[type="number"]:focus,
+.settings-popover .row select:focus { border-color: #2962ff; }
+.settings-popover .ps-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-top: 1px solid #2a2e39;
+}
+.settings-popover .ps-link {
+  background: transparent;
+  border: none;
+  color: #787b86;
+  font-size: 12.5px;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+.settings-popover .ps-link:hover { color: #d1d4dc; }
+.settings-popover .btn-primary {
+  background: #2962ff;
+  border: 1px solid #2962ff;
+  color: #fff;
+  padding: 7px 18px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-popover .btn-primary:hover { background: #1e53e5; }
+.settings-popover .ps-status {
+  min-height: 18px;
+  padding: 0 18px 10px;
+  font-size: 12.5px;
+  color: #787b86;
+  text-align: center;
+}
+.settings-popover .ps-status.success { color: #26a69a; }
+.settings-popover .ps-status.error   { color: #ef5350; }
+
+/* ===== Per-overlay position settings dialog ===== */
+.settings-popover .tabs {
+  display: flex;
+  gap: 18px;
+  padding: 8px 18px 0;
+  border-bottom: 1px solid #2a2e39;
+}
+.settings-popover .tabs .tab {
+  background: transparent;
+  border: none;
+  color: #787b86;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 6px 0 8px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.settings-popover .tabs .tab.active {
+  color: #d1d4dc;
+  border-bottom-color: #2962ff;
+}
+.settings-popover .pos-tab-body {
+  padding: 6px 0;
+}
+.settings-popover .pos-tab-body.hidden { display: none; }
+/* Per-overlay position dialog is taller than the gear popover — give it more
+   width and let it auto-size in height so all fields fit without scrolling. */
+/* Per-overlay dialog: auto-size to content, no internal scrollbars. */
+#position-overlay-settings {
+  width: min(440px, 94vw);
+}
+#position-overlay-settings .row label {
+  flex: 0 0 90px;
+}
+#position-overlay-settings .pos-select-narrow {
+  flex: 0 0 78px !important;
+}
+/* Position dialog reuses the regular settings panel's `.color-swatch` —
+   no separate styling needed. The swatch's bg is updated via JS to show
+   the current pick (with opacity baked in). */
+.settings-popover .pos-section-label {
+  padding: 12px 18px 4px;
+  color: #787b86;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+}
+.settings-popover .pos-select-narrow {
+  flex: 0 0 92px !important;
+  min-width: 0;
+}
+#position-overlay-settings .ps-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding: 14px 18px;
+  border-top: 1px solid #2a2e39;
+}
+#position-overlay-settings .ps-actions button {
+  background: #2a2e39;
+  border: 1px solid #363a45;
+  color: #d1d4dc;
+  padding: 7px 18px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+}
+#position-overlay-settings .ps-actions button:hover { background: #363a45; }
+#position-overlay-settings .ps-actions .btn-primary {
+  background: #2962ff;
+  border-color: #2962ff;
+  color: #fff;
+}
+#position-overlay-settings .ps-actions .btn-primary:hover { background: #1e53e5; }
+
+/* ===== Fibonacci per-overlay settings popover =====
+   Shares the .settings-popover base styling (positioning, header, .row,
+   close button). Adds the level-grid (24 cells in 2 columns), alpha
+   slider, template menu, and a footer with two side-by-side button
+   groups (template dropdown on the left, cancel/confirm on the right). */
+#fibo-overlay-settings {
+  width: min(420px, 94vw);
+  max-height: 88vh;
+  overflow-y: auto;
+}
+#fibo-overlay-settings .row label {
+  flex: 0 0 110px;
+}
+#fibo-overlay-settings .pos-select-narrow {
+  flex: 0 0 110px !important;
+}
+.settings-popover .fibo-tab-body {
+  padding: 8px 0 4px;
+}
+.settings-popover .fibo-tab-body.hidden { display: none; }
+
+/* Trend-line / single-color / background rows have an extra control beside
+   the label — give the label less width so the row stays compact. */
+#fibo-overlay-settings .fibo-row-trend label,
+#fibo-overlay-settings .fibo-row-single label,
+#fibo-overlay-settings .fibo-row-bg label {
+  flex: 0 0 130px;
+}
+
+/* Level grid — 2 columns, each cell holds checkbox + ratio input + swatch. */
+.fibo-levels-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+  padding: 10px 18px;
+  border-top: 1px solid #2a2e39;
+  border-bottom: 1px solid #2a2e39;
+}
+.fibo-level-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.fibo-level-cell .fibo-level-on {
+  margin: 0;
+}
+.fibo-level-cell .fibo-level-r {
+  flex: 1;
+  background: #131722;
+  border: 1px solid #2a2e39;
+  color: #d1d4dc;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+  width: 0;            /* let flex compute */
+  outline: none;
+}
+.fibo-level-cell .fibo-level-r:focus { border-color: #2962ff; }
+
+.color-swatch.fibo-swatch {
+  width: 22px;
+  height: 18px;
+  border-radius: 3px;
+  border: 1px solid #2a2e39;
+  cursor: pointer;
+  padding: 0;
+}
+.color-swatch.fibo-swatch:hover { border-color: #4a4f5c; }
+
+/* Background alpha slider */
+.fibo-alpha-slider {
+  flex: 1;
+  accent-color: #2962ff;
+}
+
+/* Coord rows in 坐標 tab — label is the "#N (價格, K棒)" prefix, then
+   price input and bar-index input side by side. */
+#fibo-overlay-settings .fibo-coord-row label {
+  flex: 0 0 130px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+#fibo-overlay-settings .fibo-coord-row .fibo-coord-hint {
+  font-size: 11px;
+  color: #6a7180;
+}
+#fibo-overlay-settings .fibo-coord-row .fibo-coord-price {
+  flex: 1 1 0;
+  min-width: 0;
+}
+#fibo-overlay-settings .fibo-coord-row .fibo-coord-bar {
+  flex: 0 0 70px;
+}
+
+/* Footer — template dropdown left, cancel/confirm right. */
+#fibo-overlay-settings .fibo-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  border-top: 1px solid #2a2e39;
+  gap: 10px;
+}
+.fibo-tpl-wrap {
+  position: relative;
+}
+.fibo-tpl-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: transparent;
+  color: #d1d4dc;
+  border: 1px solid #4a4a4a;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.fibo-tpl-btn:hover { background: #2a2e39; }
+.fibo-tpl-btn .caret { font-size: 10px; color: #787b86; }
+.fibo-tpl-popover {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  min-width: 180px;
+  background: #1e222d;
+  border: 1px solid #363a45;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.55);
+  padding: 4px 0;
+  z-index: 10110;
+}
+.fibo-tpl-popover[hidden] { display: none; }
+.fibo-tpl-item {
+  padding: 7px 14px;
+  font-size: 13px;
+  color: #d1d4dc;
+  cursor: pointer;
+}
+.fibo-tpl-item:hover { background: #2a2e39; }
+.fibo-tpl-sep {
+  height: 1px;
+  background: #363a45;
+  margin: 4px 0;
+}
+.fibo-actions {
+  display: flex;
+  gap: 8px;
+}
+.fibo-actions button {
+  background: #2a2e39;
+  border: 1px solid #363a45;
+  color: #d1d4dc;
+  padding: 7px 18px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.fibo-actions button:hover { background: #363a45; }
+.fibo-actions .btn-primary {
+  background: #2962ff;
+  border-color: #2962ff;
+  color: #fff;
+}
+.fibo-actions .btn-primary:hover { background: #1e53e5; }
+
+/* ===== Position drawing labels (rendered as figures, but the colors are
+        set here so the CSS theme stays one source of truth) ============ */
+:root {
+  --pos-profit-color:    #26a69a;
+  --pos-profit-fill:     rgba(38, 166, 154, 0.18);
+  --pos-loss-color:      #ef5350;
+  --pos-loss-fill:       rgba(239, 83, 80, 0.18);
+  --pos-info-bg:         rgba(30, 34, 45, 0.94);
+  --pos-info-text:       #d1d4dc;
+
+  /* === Sim bracket UX (spec: bracket-ux-polish) ===
+     Color tokens for the trade simulation TP/SL bracket bands,
+     drag handles, inline action buttons, and the upcoming vertical
+     rail in step 5. */
+  --sim-tp-color:        #089981;
+  --sim-sl-color:        #ff9800;
+  --sim-entry-color:     #2962ff;
+  --sim-discard-border:  #4a4a4a;
+  --sim-bg-base:         #0e1118;
+  --sim-text-primary:    #ffffff;
+}
+
+/* Confirm button gating — when proposalState.validity.canConfirm is
+   false (TP or SL is on the wrong side of the latest bar), the
+   side-panel and chart-side 確認 buttons fade out and stop
+   accepting clicks. The chart-side mirror is added in step 2. */
+.sim-cta.primary[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.sim-cta.primary[disabled]:hover { filter: none; }
+
+/* === Sim bracket tickets (spec: bracket-ux-polish §2) ===
+   DOM-rendered TradingView-style ticket pills for TP / Entry / SL.
+   Positioned absolutely inside #chart-area at right:110px (between
+   the vertical rail at right:75 and the price axis). JS positions
+   each ticket's `top` from convertToPixel(price) on every sync.
+
+   Each ticket is a horizontal flex of three "seg"s separated by 1px
+   accent-color borders:
+     [« qty]  [+/- USD]  [×]
+   TP / SL : transparent body, accent border + accent text
+   Entry   : SOLID blue fill, WHITE text, white-translucent separators
+             (and contains the inline action group [↕][捨棄][確認] on
+             the LEFT, only during pending / editing phases).
+
+   `!important` on hover/focus/active for the inline buttons per spec
+   §2: the host's generic `button` selector otherwise bleeds into them
+   and clobbers the discard / confirm colors on hover. */
+.sim-bracket-tickets {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;            /* above bands (1) + horizontal lines (2) + rail (3) */
+}
+.sim-bracket-tickets[hidden] { display: none; }
+
+.sim-ticket {
+  position: absolute;
+  right: 110px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  font-family: "Noto Sans TC", system-ui, sans-serif;
+  pointer-events: auto;
+  transform: translateY(-50%);   /* center the 24-px row on the price Y */
+  transition: box-shadow 150ms ease;
+  border-radius: 2px;            /* enough that the box-shadow ring follows */
+}
+.sim-ticket[hidden] { display: none; }
+
+/* Three segments, joined edge-to-edge with shared 1px borders. */
+.sim-ticket .seg {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  border: 1px solid var(--seg-color, var(--sim-entry-color));
+  border-right-width: 0;
+  background: rgba(14, 17, 24, 0.92);
+  color: var(--seg-color, var(--sim-text-primary));
+  font: 12px / 1 inherit;
+  cursor: default;
+  padding: 0;
+  outline: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sim-ticket .seg:last-child { border-right-width: 1px; }
+
+.sim-ticket .seg-qty {
+  padding: 0 8px;
+  gap: 2px;
+  cursor: pointer;
+}
+.sim-ticket .seg-qty .chev {
+  /* Spec §2: chevron at fs+4 (16 px), letter-spacing -2, weight 600. */
+  font-size: 16px;
+  letter-spacing: -2px;
+  font-weight: 600;
+  line-height: 1;
+}
+.sim-ticket .seg-qty .qty {
+  font-size: 13px;
+}
+
+.sim-ticket .seg-pl  { padding: 0 10px; font-size: 12px; }
+.sim-ticket .seg-x   {
+  padding: 0 7px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.7;
+  cursor: pointer;
+  font-family: system-ui, sans-serif;
+}
+.sim-ticket .seg-x:hover { opacity: 1; }
+
+/* TP green */
+.sim-ticket.tp { --seg-color: var(--sim-tp-color); }
+/* SL orange */
+.sim-ticket.sl { --seg-color: var(--sim-sl-color); }
+
+/* TP/SL tickets are vertically draggable (entry isn't). The whole
+   ticket body acts as the drag handle — `«` segment shows ns-resize
+   on hover, the seg-pl middle shows the same. ✕ keeps its pointer
+   cursor (it cancels the leg, doesn't drag). `.dragging` class is
+   added by Panel._wireTicketDrag while a drag is active. */
+.sim-ticket.tp .seg-qty,
+.sim-ticket.tp .seg-pl,
+.sim-ticket.sl .seg-qty,
+.sim-ticket.sl .seg-pl {
+  cursor: ns-resize;
+}
+.sim-ticket.tp.dragging,
+.sim-ticket.sl.dragging,
+.sim-ticket.tp.dragging .seg-qty,
+.sim-ticket.tp.dragging .seg-pl,
+.sim-ticket.sl.dragging .seg-qty,
+.sim-ticket.sl.dragging .seg-pl {
+  cursor: grabbing;
+}
+
+/* Entry — solid blue fill with white text. The seg styles inside
+   .entry-body override the per-seg accent so the WHOLE pill reads
+   as one solid blue block; internal separators use white-translucent
+   per spec §2. */
+.sim-ticket.entry {
+  --seg-color: var(--sim-entry-color);
+  gap: 4px;              /* gap between action group and entry body */
+}
+.sim-ticket.entry .entry-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.sim-ticket.entry .entry-actions[hidden] { display: none; }
+.sim-ticket.entry .entry-body {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+}
+.sim-ticket.entry .entry-body .seg {
+  background: var(--sim-entry-color);
+  color: var(--sim-text-primary);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.sim-ticket.entry .entry-body .seg:first-child {
+  border-left-color: var(--sim-entry-color);  /* outer edge same as fill */
+}
+.sim-ticket.entry .entry-body .seg:last-child {
+  border-right-color: var(--sim-entry-color);
+}
+/* R/R segment (tp-sl-drop-spec §6) — small middle pill between qty
+   and USD P/L. Hidden until both legs are dropped. Sized to content
+   ("R/R N.NN" tops out around 8 chars) with normal segment padding so
+   the text isn't cropped against the right border. */
+.sim-ticket.entry .entry-body .seg-rr {
+  padding: 0 10px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sim-ticket.entry .entry-body .seg-rr[hidden] { display: none; }
+
+/* Inline action group (entry-only). */
+.sim-ticket.entry .entry-actions button {
+  height: 24px;
+  border: 1px solid var(--sim-discard-border);
+  border-radius: 0;
+  padding: 0 12px;
+  background: var(--sim-bg-base);
+  color: var(--sim-text-primary);
+  font: 12px / 1 "Noto Sans TC", system-ui, sans-serif;
+  cursor: pointer;
+  box-shadow: none;
+  pointer-events: auto;
+}
+.sim-ticket.entry .entry-actions .sim-inline-flip {
+  width: 26px; padding: 0;
+  border-color: var(--sim-entry-color) !important;
+  color: var(--sim-entry-color) !important;
+  background: var(--sim-bg-base) !important;
+  font-size: 13px;
+}
+.sim-ticket.entry .entry-actions .sim-inline-flip:hover,
+.sim-ticket.entry .entry-actions .sim-inline-flip:focus,
+.sim-ticket.entry .entry-actions .sim-inline-flip:active {
+  background: var(--sim-bg-base) !important;
+  color: var(--sim-entry-color) !important;
+  border-color: var(--sim-entry-color) !important;
+  filter: none !important;
+}
+.sim-ticket.entry .entry-actions .sim-inline-discard,
+.sim-ticket.entry .entry-actions .sim-inline-discard:hover,
+.sim-ticket.entry .entry-actions .sim-inline-discard:focus,
+.sim-ticket.entry .entry-actions .sim-inline-discard:active {
+  border-color: var(--sim-discard-border) !important;
+  background: var(--sim-bg-base) !important;
+  color: var(--sim-text-primary) !important;
+  filter: none !important;
+}
+.sim-ticket.entry .entry-actions .sim-inline-confirm,
+.sim-ticket.entry .entry-actions .sim-inline-confirm:hover,
+.sim-ticket.entry .entry-actions .sim-inline-confirm:focus,
+.sim-ticket.entry .entry-actions .sim-inline-confirm:active {
+  border-color: var(--sim-entry-color) !important;
+  background: var(--sim-entry-color) !important;
+  color: var(--sim-text-primary) !important;
+  filter: none !important;
+}
+.sim-ticket.entry .entry-actions .sim-inline-confirm[disabled] {
+  opacity: 0.4;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+/* Short-position color override. Re-defines the --sim-entry-color
+   custom property scoped to the entry ticket so all the existing
+   rules above (border colors, button backgrounds, body fill) auto-
+   pick up the red theme via inheritance. The matching entry-line
+   overlay in sim_overlays.js renders the canvas line in #ef5350 too. */
+.sim-ticket.entry.short {
+  --sim-entry-color: #ef5350;
+}
+.sim-ticket.entry.short .entry-body .seg {
+  background: #ef5350;
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.sim-ticket.entry.short .entry-body .seg:first-child {
+  border-left-color: #ef5350;
+}
+.sim-ticket.entry.short .entry-body .seg:last-child {
+  border-right-color: #ef5350;
+}
+
+/* =========================================================
+   Pending-order tickets (limit / stop / stop-limit)
+   Mirror the entry ticket structure: a "side button" on the
+   LEFT (solid color, white text) + a flex pill on the RIGHT
+   ([« qty] [type label] [×]) with the same accent color as
+   the side button. Whole ticket is vertically draggable —
+   _wirePendingTicketDrag in sim_panel.js converts mouse Y
+   into a new limit/stop price and calls eng.modifyOrder.
+   ========================================================= */
+.sim-pending-tickets {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;            /* same layer as bracket tickets */
+}
+.sim-pending-tickets[hidden] { display: none; }
+
+.sim-pending-ticket {
+  position: absolute;
+  right: 110px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: "Noto Sans TC", system-ui, sans-serif;
+  pointer-events: auto;
+  transform: translateY(-50%);
+  cursor: default;            /* default — drag is restricted to .seg-qty */
+  --pt-color: var(--sim-entry-color);
+}
+.sim-pending-ticket.dragging,
+.sim-pending-ticket.dragging .seg-qty {
+  cursor: grabbing;
+}
+.sim-pending-ticket.buy  { --pt-color: #2962ff; }
+.sim-pending-ticket.sell { --pt-color: #ef5350; }
+
+/* Left side button — solid filled, white text. Shows 買入 / 賣出.
+   Click = visual confirmation that the limit is active at the current
+   (dragged) price. Drag actually modifies the order; this is the user-
+   facing "yes I see it" affordance.
+   NOT a drag handle — drag is restricted to .seg-qty per user spec. */
+.sim-pending-ticket .pt-side-btn {
+  height: 24px;
+  padding: 0 12px;
+  background: var(--pt-color);
+  color: #ffffff;
+  border: 1px solid var(--pt-color);
+  border-radius: 0;
+  font: 12px / 1 inherit;
+  font-weight: 600;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: filter 80ms ease;
+}
+.sim-pending-ticket .pt-side-btn:hover  { filter: brightness(1.15); }
+.sim-pending-ticket .pt-side-btn:active { filter: brightness(0.85); }
+
+/* ---- Three-state machine for pending tickets ----------------------
+   data-state="draft"   — pre-engine: side button bright, body dimmer
+   data-state="active"  — engine pending: side button hidden
+   data-state="editing" — drag in progress: 確認/捨棄 visible */
+
+/* Side button (買入/賣出): only visible in 'draft' state. */
+.sim-pending-ticket[data-state="active"]  .pt-side-btn,
+.sim-pending-ticket[data-state="editing"] .pt-side-btn {
+  display: none;
+}
+
+/* 確認/捨棄: only visible while user is editing a placed order. */
+.sim-pending-ticket .pt-confirm,
+.sim-pending-ticket .pt-discard {
+  display: none;
+  height: 24px;
+  padding: 0 12px;
+  border-radius: 0;
+  font: 12px / 1 inherit;
+  font-weight: 500;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: filter 80ms ease;
+}
+.sim-pending-ticket[data-state="editing"] .pt-confirm,
+.sim-pending-ticket[data-state="editing"] .pt-discard {
+  display: inline-flex;
+  align-items: center;
+}
+/* 確認 = primary blue (matches the pt-color of the order's side) */
+.sim-pending-ticket .pt-confirm {
+  background: var(--pt-color);
+  color: #ffffff;
+  border: 1px solid var(--pt-color);
+}
+.sim-pending-ticket .pt-confirm:hover  { filter: brightness(1.15); }
+.sim-pending-ticket .pt-confirm:active { filter: brightness(0.85); }
+/* 捨棄 = neutral dark with a grey border */
+.sim-pending-ticket .pt-discard {
+  background: var(--sim-bg-base, #0e1118);
+  color: var(--sim-text-primary, #ffffff);
+  border: 1px solid var(--sim-discard-border, #4a4a4a);
+}
+.sim-pending-ticket .pt-discard:hover { background: #2a2e39; }
+
+/* Draft styling: body segments dimmer, side button bright. The line
+   itself is canvas-rendered and uses extendData.draft for its alpha. */
+.sim-pending-ticket[data-state="draft"] .pt-body .seg {
+  opacity: 0.55;
+}
+.sim-pending-ticket[data-state="draft"] .pt-body .seg-x {
+  /* ✕ stays at 0.7 default opacity which already matches dim look */
+  opacity: 0.55;
+}
+.sim-pending-ticket[data-state="draft"] .pt-side-btn {
+  /* Bright: full opacity, the only "alive" element pre-commit. */
+  opacity: 1;
+}
+
+/* Right body — pill with three internal segments. */
+.sim-pending-ticket .pt-body {
+  display: inline-flex;
+  align-items: stretch;
+  height: 100%;
+}
+.sim-pending-ticket .pt-body .seg {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  border: 1px solid var(--pt-color);
+  border-right-width: 0;
+  background: rgba(14, 17, 24, 0.92);
+  color: var(--pt-color);
+  font: 12px / 1 inherit;
+  padding: 0;
+  outline: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: default;       /* type label / qty are display-only by default */
+}
+.sim-pending-ticket .pt-body .seg:last-child { border-right-width: 1px; }
+/* «1 segment is the drag affordance — vertical-resize cursor on hover. */
+.sim-pending-ticket .pt-body .seg-qty {
+  padding: 0 8px;
+  gap: 2px;
+  cursor: ns-resize;
+}
+.sim-pending-ticket .pt-body .seg-qty .chev {
+  font-size: 16px;
+  letter-spacing: -2px;
+  font-weight: 600;
+  line-height: 1;
+}
+.sim-pending-ticket .pt-body .seg-qty .qty {
+  font-size: 13px;
+}
+.sim-pending-ticket .pt-body .seg-type {
+  padding: 0 10px;
+  font-size: 12px;
+}
+.sim-pending-ticket .pt-body .seg-x {
+  padding: 0 7px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.7;
+  cursor: pointer;
+  font-family: system-ui, sans-serif;
+  /* Per user bug report — the × needs to OCCLUDE the dashed price
+     line behind it, not let it bleed through. Removing the previous
+     `background: transparent` lets the .seg rule's opaque dark fill
+     (rgba(14,17,24,0.92)) cascade in, which covers the line. */
+  background: rgba(14, 17, 24, 0.92);
+}
+.sim-pending-ticket .pt-body .seg-x:hover { opacity: 1; }
+
+/* Spec §4 invalid: red box-shadow ring outside the badge + ⚠ glyph
+   to the LEFT of the badge. Line itself stays accent color. */
+.sim-ticket.invalid {
+  box-shadow: 0 0 0 1px rgba(239, 53, 53, 0.4);
+}
+.sim-ticket-warn {
+  width: 18px; height: 18px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #ef3535;
+  color: #ffffff;
+  font: 600 13px / 1 "Noto Sans TC", system-ui, sans-serif;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  cursor: help;
+}
+.sim-ticket-warn[hidden] { display: none; }
+
+/* === Sim bracket vertical rail + dots (spec: bracket-ux-polish §3) ===
+   A 1-px blue vertical line between the badges and the price axis,
+   with three opaque-bg dots at TP / entry / SL price levels. The rail
+   anchors to the right side of #chart-area; JS positions each dot's
+   `top` from convertToPixel(price). Hidden during phase==='armed' (or
+   when no proposal is active). The dot's bg defaults to --sim-bg-base
+   so the dashed price line passes BEHIND the dot rather than through
+   it. Drag a leg → that leg's dot fills with --sim-entry-color. */
+.sim-bracket-rail {
+  position: absolute;
+  inset: 0;            /* fill chart-area; children are absolutely placed */
+  pointer-events: none;
+  z-index: 3;          /* above bands + horizontal lines, below rail dots */
+}
+.sim-bracket-rail[hidden] { display: none; }
+
+.sim-rail-line {
+  position: absolute;
+  top: 0; bottom: 0;
+  right: 75px;
+  width: 1px;
+  background: var(--sim-entry-color);
+  opacity: 0;          /* default hidden — fades in via .sim-rail-visible */
+  transition: opacity 200ms ease;
+}
+
+.sim-rail-dot {
+  position: absolute;
+  right: 75px;
+  width: 9px; height: 9px;
+  border: 1px solid var(--sim-entry-color);
+  background: var(--sim-bg-base);
+  border-radius: 50%;
+  transform: translate(50%, -50%);    /* center 9px dot on the 1px rail */
+  opacity: 0;          /* default hidden — fades in via .sim-rail-visible */
+  transition: opacity 200ms ease, background-color 120ms ease;
+  z-index: 5;          /* above the rail line so it visually breaks it */
+}
+/* Spec §3: rail elements only become visible while the user hovers a
+   ticket OR is actively dragging a leg. JS toggles `.sim-rail-visible`
+   on the container based on hover counter + ps.draggingLeg. The 200ms
+   transition masks the brief counter==0 frame as the cursor crosses
+   between adjacent tickets. */
+.sim-rail-visible .sim-rail-line { opacity: 0.7; }
+.sim-rail-visible .sim-rail-dot  { opacity: 1;   }
+
+/* Dragging a leg → that leg's dot fills solid blue. Toggled in JS by
+   adding/removing the `dragging` class. */
+.sim-rail-dot.dragging {
+  background: var(--sim-entry-color);
+}
+/* Disabled leg (e.g. user toggled SL off) — hide the corresponding dot. */
+.sim-rail-dot[hidden] { display: none; }
+
+/* =========================================================
+   Leg-drop affordance — tp-sl-drop-spec
+   `+TP` / `+SL` buttons in entry-actions are the drag SOURCES.
+   `#sim-leg-ghost` is the in-flight ticket that follows the cursor.
+   `.sim-ticket.dropping` plays a brief settle animation when a leg
+   lands at its dropped price.
+   ========================================================= */
+.sim-ticket.entry .entry-actions .sim-leg-drop {
+  width: 32px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--leg-color, var(--sim-tp-color));
+  border-radius: 0;
+  background: var(--sim-bg-base);
+  color: var(--leg-color, var(--sim-tp-color));
+  font: 600 11px / 1 "Noto Sans TC", system-ui, sans-serif;
+  letter-spacing: 0.5px;
+  cursor: grab;
+  pointer-events: auto;
+  box-shadow: none;
+}
+.sim-ticket.entry .entry-actions .sim-leg-drop.tp { --leg-color: var(--sim-tp-color); }
+.sim-ticket.entry .entry-actions .sim-leg-drop.sl { --leg-color: var(--sim-sl-color); }
+.sim-ticket.entry .entry-actions .sim-leg-drop:hover,
+.sim-ticket.entry .entry-actions .sim-leg-drop:focus,
+.sim-ticket.entry .entry-actions .sim-leg-drop:active {
+  background: color-mix(in srgb, var(--leg-color) 14%, var(--sim-bg-base)) !important;
+  color: var(--leg-color) !important;
+  border-color: var(--leg-color) !important;
+  filter: none !important;
+}
+.sim-ticket.entry .entry-actions .sim-leg-drop.dragging {
+  cursor: grabbing;
+}
+.sim-ticket.entry .entry-actions .sim-leg-drop[hidden] { display: none; }
+
+/* Ghost mini-ticket follows the cursor during drag.
+   Three flat segments, NO separator borders (contrast with the
+   dropped 3-segment pill which DOES have borders — visual cue
+   that the in-flight pill isn't committed yet).
+   `position: fixed` so it tracks page-level mouse coords;
+   `pointer-events: none` so the chart still reports hovered
+   prices underneath the ghost. */
+.sim-leg-ghost {
+  position: fixed;
+  left: 0; top: 0;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--leg-color, var(--sim-tp-color));
+  background: rgba(14, 17, 24, 0.92);
+  color: var(--leg-color, var(--sim-tp-color));
+  font: 11px / 1 "Noto Sans TC", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transform: translate(8px, -50%);
+  pointer-events: none;
+  z-index: 10000;
+  user-select: none;
+}
+.sim-leg-ghost[data-leg="tp"] { --leg-color: var(--sim-tp-color); }
+.sim-leg-ghost[data-leg="sl"] { --leg-color: var(--sim-sl-color); }
+.sim-leg-ghost .chev      { font-size: 14px; letter-spacing: -1px; font-weight: 600; }
+.sim-leg-ghost .leg-name  { font-weight: 600; letter-spacing: 0.5px; }
+.sim-leg-ghost .amount    { opacity: 0.92; }
+.sim-leg-ghost[hidden]    { display: none; }
+
+/* Drop animation — scale-only settle (NEVER animate `top` because
+   that interpolates the price and is misleading). 4% overshoot at
+   60% gives a TV-style snap-into-place feel. */
+@keyframes sim-leg-drop {
+  0%   { transform: scale(0.85); opacity: 0.6; }
+  60%  { transform: scale(1.04); opacity: 1;   }
+  100% { transform: scale(1);    opacity: 1;   }
+}
+.sim-ticket.dropping {
+  animation: sim-leg-drop 180ms cubic-bezier(0.2, 0.8, 0.3, 1);
+  transform-origin: right center;
+}
+
+/* =========================================================
+   Sim trading panel — sim_panel.js
+   Sits as a flex sibling of #chart-area inside #main, so opening
+   it visibly shrinks the chart (TradingView-style dock) instead
+   of overlaying the price axis. Width is fixed; chart-area gets
+   `flex: 1` and absorbs the rest.
+   ========================================================= */
+#sim-panel {
+  flex: 0 0 320px;
+  width: 320px;
+  height: 100%;
+  background: #1e222d;
+  border-left: 1px solid #2a2e39;
+  display: flex; flex-direction: column;
+  font-size: 13px;
+  overflow: hidden;
+  /* No z-index needed — panel is a regular flow child now. The color
+     popover (10200) still floats above when opened from inside. */
+}
+#sim-panel header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; border-bottom: 1px solid #2a2e39;
+}
+#sim-panel header .title { font-size: 14px; font-weight: 600; color: #fff; }
+#sim-panel header .sim-symbol {
+  flex: 1; font-size: 12px; color: #787b86; font-weight: 500;
+}
+#sim-panel header .close-btn {
+  color: #787b86; font-size: 16px; padding: 2px 6px; cursor: pointer;
+}
+#sim-panel header .close-btn:hover { color: #fff; }
+
+/* Mode tabs (下單 / DOM) */
+.sim-mode-tabs {
+  display: flex; padding: 4px 8px 0; gap: 4px;
+  border-bottom: 1px solid #2a2e39;
+}
+.sim-mode-tab {
+  background: transparent; border: none; color: #787b86;
+  padding: 6px 12px; font-size: 12px; cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.sim-mode-tab.active { color: #d1d4dc; border-bottom-color: #2962ff; }
+.sim-mode-tab.disabled { color: #4a4f5c; cursor: not-allowed; }
+.sim-mode-tab:not(.active):not(.disabled):hover { color: #d1d4dc; }
+
+/* Order type tabs (市場/限價/停損/停損限價) */
+.sim-type-tabs {
+  display: flex; gap: 0; padding: 8px;
+  background: #131722;
+}
+.sim-type-tab {
+  flex: 1; background: transparent; border: 1px solid #2a2e39;
+  color: #787b86; padding: 6px 4px; font-size: 12px; cursor: pointer;
+  border-right-width: 0;
+}
+.sim-type-tab:last-child { border-right-width: 1px; }
+.sim-type-tab.active { background: #2a2e39; color: #fff; }
+.sim-type-tab:not(.active):hover { background: rgba(42,46,57,0.5); color: #d1d4dc; }
+
+/* Form rows */
+.sim-form { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.sim-row {
+  display: flex; align-items: center; gap: 10px;
+}
+.sim-row label {
+  flex: 0 0 80px; color: #787b86; font-size: 12px;
+}
+.sim-row input[type="number"] {
+  flex: 1; background: #131722; border: 1px solid #363a45;
+  color: #fff; border-radius: 3px; padding: 6px 8px; font-size: 13px;
+  text-align: right; font-variant-numeric: tabular-nums;
+}
+.sim-row input[type="number"]:focus { border-color: #2962ff; outline: none; }
+
+/* 訂單資訊 read-only block */
+.sim-info {
+  padding: 8px 0; border-top: 1px solid #2a2e39; border-bottom: 1px solid #2a2e39;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.sim-info-row {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12px;
+}
+.sim-info-row > span:first-child { color: #787b86; }
+.sim-info-row > span:last-child  { color: #d1d4dc; font-variant-numeric: tabular-nums; }
+
+/* Bid / Ask twin block */
+.sim-bidask {
+  display: flex; gap: 6px;
+}
+.sim-bidask-cell {
+  flex: 1; padding: 8px 10px; border-radius: 4px;
+  background: #131722; border: 1px solid #363a45;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+}
+.sim-bidask-cell.sell { border-color: rgba(239,83,80,0.45); }
+.sim-bidask-cell.buy  { border-color: rgba(38,166,154,0.45); }
+.sim-bidask-label { font-size: 10px; color: #787b86; }
+.sim-bidask-price {
+  font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums;
+  color: #d1d4dc;
+}
+.sim-bidask-cell.sell .sim-bidask-price { color: #ef5350; }
+.sim-bidask-cell.buy  .sim-bidask-price { color: #26a69a; }
+
+/* CTA buttons */
+.sim-cta-stack { display: flex; flex-direction: column; gap: 6px; }
+.sim-cta {
+  width: 100%; padding: 10px 14px; border-radius: 4px;
+  font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent;
+  transition: filter 0.1s, background 0.1s;
+}
+.sim-cta.buy   { background: #26a69a; color: #fff; }
+.sim-cta.sell  { background: #ef5350; color: #fff; }
+.sim-cta.neutral {
+  background: transparent; border-color: #363a45; color: #d1d4dc;
+}
+.sim-cta:hover:not(:disabled) { filter: brightness(1.1); }
+.sim-cta:disabled {
+  opacity: 0.5; cursor: not-allowed;
+}
+
+.sim-warning {
+  font-size: 11px; color: #ffb74d; padding: 6px 8px;
+  background: rgba(255,183,77,0.1); border: 1px solid rgba(255,183,77,0.3);
+  border-radius: 3px; line-height: 1.4;
+}
+
+/* Position view */
+.sim-position-header {
+  padding: 14px; font-size: 14px; font-weight: 600; color: #fff;
+  text-align: center; border-bottom: 1px solid #2a2e39;
+}
+.sim-position-stats { padding: 10px 14px; display: flex; flex-direction: column; gap: 6px; }
+.sim-position-actions {
+  padding: 10px 14px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+/* The side-panel 退出 (TP/SL proposal) section + .sim-proposal-actions
+   row were removed in tp-sl-drop-spec §6 — TP/SL setup is fully
+   chart-side now (drag +TP / +SL drop sources from the entry ticket). */
+
+.sim-cta.primary {
+  background: #2962ff; color: #fff;
+}
+.sim-cta.primary:hover:not(:disabled) { filter: brightness(1.1); }
+
+/* Pending orders list */
+.sim-pending-list {
+  border-top: 1px solid #2a2e39; padding: 4px 0;
+  max-height: 160px; overflow-y: auto;
+}
+.sim-pending-list:empty { display: none; }
+.sim-pending-row {
+  display: grid; grid-template-columns: auto 1fr auto auto;
+  align-items: center; gap: 8px;
+  padding: 6px 14px; font-size: 12px;
+  border-bottom: 1px solid rgba(42,46,57,0.5);
+}
+.sim-pending-row:last-child { border-bottom: none; }
+.sim-pending-row .badge {
+  display: inline-block; padding: 1px 6px; border-radius: 3px;
+  font-size: 10px; font-weight: 600;
+}
+.sim-pending-row.buy  .badge { background: rgba(38,166,154,0.2); color: #26a69a; }
+.sim-pending-row.sell .badge { background: rgba(239,83,80,0.2);  color: #ef5350; }
+.sim-pending-row .meta {
+  color: #787b86; font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.sim-pending-row .price {
+  color: #d1d4dc; font-variant-numeric: tabular-nums; font-size: 12px;
+}
+.sim-pending-row .x-btn {
+  color: #787b86; font-size: 14px; padding: 2px 6px; border-radius: 2px;
+}
+.sim-pending-row .x-btn:hover { background: #2a2e39; color: #ef5350; }
+
+/* =========================================================
+   Branch panel (branching-replay-spec §5.3)
+   ========================================================= */
+
+/* Spec §5.1 kind colors — token form so future panels share one source. */
+:root {
+  --branch-main:      #5a6478;
+  --branch-exec:      #089981;
+  --branch-direction: #ef5350;
+  --branch-sandbox:   #7d6cbf;
+  --branch-archived:  #3a3f4b;
+}
+
+#branch-panel {
+  flex: 0 0 300px;
+  width: 300px;
+  height: 100%;
+  background: #1e222d;
+  border-left: 1px solid #2a2e39;
+  display: flex; flex-direction: column;
+  font-size: 13px;
+  overflow: hidden;
+}
+#branch-panel.hidden { display: none; }
+
+#branch-panel header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border-bottom: 1px solid #2a2e39;
+}
+#branch-panel header .title { font-size: 14px; font-weight: 600; color: #fff; }
+#branch-panel header .branch-panel-count {
+  font-size: 12px; color: #787b86; font-variant-numeric: tabular-nums;
+}
+#branch-panel header .spacer { flex: 1; }
+#branch-panel header .close-btn {
+  color: #787b86; font-size: 16px; padding: 2px 6px; cursor: pointer;
+  background: transparent; border: 0;
+}
+#branch-panel header .close-btn:hover { color: #fff; }
+
+.branch-panel-toolbar {
+  padding: 8px 14px;
+  border-bottom: 1px solid #2a2e39;
+}
+.branch-archived-toggle {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #787b86; cursor: pointer;
+  user-select: none;
+}
+.branch-archived-toggle input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.branch-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.branch-list-empty {
+  padding: 24px 14px;
+  color: #4a4f5c;
+  font-size: 12px;
+  text-align: center;
+}
+
+.branch-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background 80ms ease, border-color 80ms ease;
+}
+.branch-row:hover {
+  background: rgba(42, 46, 57, 0.6);
+}
+.branch-row.active {
+  background: rgba(41, 98, 255, 0.10);
+  border-left-color: #2962ff;
+}
+.branch-row.is-main .branch-name {
+  font-weight: 600;
+}
+
+.branch-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--branch-exec);
+}
+
+.branch-info {
+  min-width: 0;       /* allow truncation if name is long */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.branch-name-row {
+  display: flex; align-items: center; gap: 6px;
+  min-width: 0;
+}
+.branch-name {
+  color: #d1d4dc;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.branch-meta {
+  font-size: 11px;
+  color: #787b86;
+  font-variant-numeric: tabular-nums;
+}
+.branch-state-badge {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 5px;
+  border-radius: 2px;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+.branch-state-badge.view {
+  background: rgba(41, 98, 255, 0.18);
+  color: #4078ff;
+}
+.branch-state-badge.mini {
+  background: rgba(125, 108, 191, 0.18);
+  color: #a89aff;
+}
+
+.branch-pnl {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.branch-pnl.pos  { color: #26a69a; }
+.branch-pnl.neg  { color: #ef5350; }
+.branch-pnl.zero { color: #787b86; }
+
+/* Bottom summary block (spec §5.3.4) */
+.branch-summary {
+  border-top: 1px solid #2a2e39;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.branch-summary .summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #787b86;
+}
+.branch-summary .summary-row.sub {
+  color: #5a6478;
+  font-size: 11px;
+}
+.branch-summary .summary-row.main-real {
+  color: #d1d4dc;
+}
+.branch-summary .summary-val {
+  color: #d1d4dc;
+  font-variant-numeric: tabular-nums;
+}
+.branch-summary .summary-val.pos  { color: #26a69a; }
+.branch-summary .summary-val.neg  { color: #ef5350; }
+.branch-summary .summary-val.zero { color: #787b86; }
+.branch-summary .summary-divider {
+  height: 1px;
+  background: rgba(42, 46, 57, 0.7);
+  margin: 2px 0;
+}
+.branch-summary .summary-row.contam {
+  color: #ffb74d;
+  font-size: 11px;
+  font-weight: 500;
+}
+.branch-summary .summary-link {
+  background: transparent;
+  border: 0;
+  color: #4078ff;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+}
+.branch-summary .summary-link:hover {
+  text-decoration: underline;
+}
+
+/* =========================================================
+   Branch pill (toolbar) — branching-replay-spec §5.1
+   Sits next to 重播 in the topbar-left when the user has
+   more than one branch. Shows the active branch's name with
+   kind-color tint. Optional contamination badge (Phase 6+).
+   ========================================================= */
+.branch-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: rgba(90, 100, 120, 0.18);
+  font-size: 12px;
+  color: #d1d4dc;
+  font-weight: 500;
+  user-select: none;
+  border: 1px solid rgba(90, 100, 120, 0.35);
+}
+.branch-pill[hidden] { display: none; }
+.branch-pill.kind-main      { background: rgba(90,100,120,0.18); border-color: var(--branch-main); }
+.branch-pill.kind-exec      { background: rgba(8,153,129,0.18);  border-color: var(--branch-exec); color: #4ad9b6; }
+.branch-pill.kind-direction { background: rgba(239,83,80,0.18);  border-color: var(--branch-direction); color: #ff8a87; }
+.branch-pill.kind-sandbox   { background: rgba(125,108,191,0.20); border-color: var(--branch-sandbox); color: #b4a6ff; }
+.branch-pill.kind-archived  { background: rgba(58,63,75,0.5);    border-color: var(--branch-archived); color: #787b86; }
+.branch-pill .branch-pill-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.branch-pill .branch-pill-name {
+  font-variant-numeric: tabular-nums;
+}
+.branch-pill .branch-pill-contam {
+  margin-left: 4px;
+  font-size: 10px;
+  color: #ffb74d;
+  font-weight: 600;
+}
+
+/* =========================================================
+   Branch fork modals — branching-replay-spec §4
+   Dark card centered on a 50%-opaque backdrop. Shared by
+   manualFork (Phase 2), forkOrDiscard (Phase 3), promotion
+   (Phase 6), deleteBranch (Phase 5) — keep the rules generic
+   so future modal types reuse the same structure.
+   ========================================================= */
+.branch-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 12000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: "Noto Sans TC", system-ui, sans-serif;
+}
+.branch-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+/* Modifier — overlays that should leave the chart visible (e.g.
+   editNote, where the user wants to keep watching K-bars while
+   composing the note). Backdrop becomes transparent + no blur.
+   Clicks outside the card still close the modal because the
+   backdrop element retains its click handler. */
+.branch-modal-overlay-clear .branch-modal-backdrop {
+  background: transparent;
+  backdrop-filter: none;
+}
+.branch-modal-card {
+  position: relative;
+  width: 460px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+  background: #1e222d;
+  border: 1px solid #363a45;
+  border-radius: 8px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  color: #d1d4dc;
+}
+.branch-modal-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid #2a2e39;
+}
+.branch-modal-icon {
+  width: 38px; height: 38px;
+  border-radius: 50%;
+  background: rgba(41, 98, 255, 0.18);
+  color: #4078ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.branch-modal-icon.icon-fork { background: rgba(41, 98, 255, 0.18); color: #4078ff; }
+.branch-modal-titles { flex: 1; min-width: 0; }
+.branch-modal-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #ffffff;
+}
+.branch-modal-subtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #787b86;
+  line-height: 1.5;
+}
+.branch-modal-subtitle strong { color: #d1d4dc; font-weight: 500; }
+
+.branch-modal-body {
+  padding: 12px 20px 8px;
+}
+.branch-modal-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.branch-modal-label {
+  font-size: 12px;
+  color: #787b86;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.branch-modal-required {
+  font-size: 10px;
+  color: #ef5350;
+  font-weight: 600;
+  background: rgba(239, 83, 80, 0.12);
+  padding: 1px 6px;
+  border-radius: 2px;
+}
+.branch-modal-hint {
+  font-size: 10px;
+  color: #4a4f5c;
+}
+
+/* Kind picker — three radio-style buttons in a row. Each has icon
+   on top, title middle, subtitle bottom. Selected gets a tinted
+   background + accent border in the kind's color. */
+.branch-kind-picker {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.branch-kind-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 8px;
+  background: #131722;
+  border: 1px solid #363a45;
+  border-radius: 4px;
+  color: #787b86;
+  font: 12px / 1 inherit;
+  cursor: pointer;
+  text-align: center;
+  transition: all 80ms ease;
+}
+.branch-kind-btn:hover {
+  border-color: #4a4f5c;
+  background: #1c2030;
+}
+.branch-kind-btn .branch-kind-icon { font-size: 18px; line-height: 1; }
+.branch-kind-btn .branch-kind-title { font-weight: 600; color: #d1d4dc; font-size: 13px; }
+.branch-kind-btn .branch-kind-subtitle { font-size: 11px; color: #5a6478; line-height: 1.3; }
+
+.branch-kind-btn.kind-exec.selected {
+  background: rgba(8, 153, 129, 0.14);
+  border-color: var(--branch-exec);
+}
+.branch-kind-btn.kind-exec.selected .branch-kind-title  { color: #4ad9b6; }
+.branch-kind-btn.kind-exec.selected .branch-kind-icon   { color: var(--branch-exec); }
+.branch-kind-btn.kind-direction.selected {
+  background: rgba(239, 83, 80, 0.14);
+  border-color: var(--branch-direction);
+}
+.branch-kind-btn.kind-direction.selected .branch-kind-title { color: #ff8a87; }
+.branch-kind-btn.kind-direction.selected .branch-kind-icon  { color: var(--branch-direction); }
+.branch-kind-btn.kind-sandbox.selected {
+  background: rgba(125, 108, 191, 0.18);
+  border-color: var(--branch-sandbox);
+}
+.branch-kind-btn.kind-sandbox.selected .branch-kind-title { color: #b4a6ff; }
+.branch-kind-btn.kind-sandbox.selected .branch-kind-icon  { color: var(--branch-sandbox); }
+
+/* Inputs */
+.branch-modal-input,
+.branch-modal-textarea {
+  background: #131722;
+  border: 1px solid #363a45;
+  color: #d1d4dc;
+  padding: 8px 10px;
+  border-radius: 3px;
+  font: 13px / 1.4 inherit;
+  width: 100%;
+  box-sizing: border-box;
+  outline: none;
+  resize: vertical;
+}
+.branch-modal-input:focus,
+.branch-modal-textarea:focus { border-color: #2962ff; }
+.branch-modal-textarea { min-height: 48px; }
+
+/* Action row */
+.branch-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px 18px;
+  border-top: 1px solid #2a2e39;
+}
+.branch-modal-btn {
+  padding: 8px 16px;
+  border-radius: 3px;
+  font: 13px / 1 inherit;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: filter 80ms ease, opacity 80ms ease;
+}
+.branch-modal-btn-secondary {
+  background: transparent;
+  border-color: #363a45;
+  color: #d1d4dc;
+}
+.branch-modal-btn-secondary:hover { background: #2a2e39; }
+.branch-modal-btn-primary {
+  background: #2962ff;
+  border-color: #2962ff;
+  color: #ffffff;
+}
+.branch-modal-btn-primary:hover:not(:disabled) { filter: brightness(1.12); }
+.branch-modal-btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+/* Destructive variant — used by 「丟棄近期交易」 in the fork-or-discard
+   modal. Subdued red, less aggressive than primary blue so the fork
+   path remains the visual default. */
+.branch-modal-btn-danger {
+  background: transparent;
+  border-color: #c44;
+  color: #ff8a87;
+}
+.branch-modal-btn-danger:hover { background: rgba(255,138,135,0.08); }
+
+/* Three-button footer (cancel / discard / fork) — slightly looser
+   gap so the danger button doesn't visually merge with cancel. */
+.branch-modal-actions-three { gap: 10px; }
+
+/* Stats block at the top of the fork-or-discard body — shows what's
+   being lost so the user makes an informed choice. */
+.branch-modal-fod .branch-modal-stats {
+  background: #131722;
+  border: 1px solid #2a2e39;
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+}
+.branch-modal-stat-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 12px; line-height: 1.6;
+}
+.branch-modal-stat-row + .branch-modal-stat-row { margin-top: 4px; }
+.branch-modal-stat-label { color: #6a7180; }
+.branch-modal-stat-value { color: #d1d4dc; font-variant-numeric: tabular-nums; }
+.branch-modal-stat-sub .branch-modal-stat-value { color: #b2b5be; font-size: 11px; }
+
+/* Delete-branch modal — danger styling for the destructive primary
+   button + bullet list of consequences. */
+.branch-modal-icon.icon-danger {
+  color: #ef5350;
+}
+.branch-modal-bullets {
+  margin: 0; padding: 0 0 0 18px;
+  font-size: 13px; color: #b2b5be; line-height: 1.7;
+}
+.branch-modal-bullets li { padding: 2px 0; }
+.branch-modal-bullets li::marker { color: #5a6478; }
+.branch-modal-bullets strong { color: #d1d4dc; font-weight: 600; }
+/* Solid red primary button for the irreversible delete confirm. */
+.branch-modal-btn-danger-primary,
+.branch-modal-btn-danger-primary:hover,
+.branch-modal-btn-danger-primary:focus {
+  background: #ef5350;
+  border-color: #ef5350;
+  color: #ffffff;
+}
+.branch-modal-btn-danger-primary:hover { filter: brightness(1.08); }
+/* Disabled state on the danger primary — used during the 3-second
+   cooldown on promotion step 1. Greyed + cursor:not-allowed. */
+.branch-modal-btn-danger-primary:disabled,
+.branch-modal-btn-danger-primary[disabled] {
+  background: #5a3633;
+  border-color: #5a3633;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: not-allowed;
+  filter: none;
+}
+
+/* Promotion modal (spec §4.3) — 3-step gauntlet. Card width + step
+   indicator + per-step body styles. */
+.branch-modal-card.branch-modal-promotion { width: 540px; max-width: 92vw; }
+.promotion-subtitle { display: flex; align-items: center; gap: 10px; }
+.promotion-step-label {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: rgba(239, 83, 80, 0.18);
+  color: #ff8a87;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+}
+.promotion-warning p { margin: 0 0 10px; line-height: 1.55; }
+.promotion-warning .branch-modal-bullets { margin: 8px 0 12px; padding-left: 22px; }
+.promotion-warning .branch-modal-bullets li { margin-bottom: 4px; line-height: 1.5; }
+.promotion-warn-note {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: rgba(239, 83, 80, 0.08);
+  border-left: 3px solid #ef5350;
+  border-radius: 3px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #d1d4dc;
+}
+.promotion-warn-note strong { color: #ff8a87; }
+
+.promotion-typeconfirm p { margin: 0 0 8px; line-height: 1.5; }
+.promotion-expected {
+  font-size: 13px;
+  color: #b2b5be;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 6px 10px;
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.promotion-expected strong { color: #ffffff; font-weight: 600; }
+.promotion-name-input {
+  width: 100%;
+  margin: 10px 0 8px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 13px;
+}
+.promotion-typeconfirm .branch-modal-hint { margin: 4px 0 0; font-size: 11px; }
+
+.promotion-reason p { margin: 0 0 8px; line-height: 1.5; }
+.promotion-reason-note {
+  font-size: 12px;
+  color: #b2b5be;
+  margin-bottom: 12px;
+  line-height: 1.6;
+}
+.promotion-reason-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 100px;
+}
+.promotion-reason-counter {
+  text-align: right;
+  font-size: 11px;
+  color: #787b86;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.promotion-reason-examples {
+  margin-top: 14px;
+  font-size: 12px;
+  color: #b2b5be;
+}
+.promotion-reason-examples summary {
+  cursor: pointer;
+  user-select: none;
+  color: #d1d4dc;
+}
+.promotion-reason-examples ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+.promotion-reason-examples li { margin-bottom: 4px; line-height: 1.55; }
+.promotion-reason-examples li.ok  { color: #4ad9b6; }
+.promotion-reason-examples li.bad { color: #ff8a87; }
+
+/* §5.5 Promotion-history modal — vertical timeline of every promotion
+   that's ever happened in this layout. Each node is clickable to
+   switch the active branch to that historical state. */
+.branch-modal-card.branch-modal-history { width: 560px; max-width: 92vw; }
+.history-body { padding: 0; }
+.history-timeline {
+  padding: 4px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.history-node {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  background: #131722;
+  border: 1px solid #363a45;
+  border-radius: 4px;
+  padding: 10px 14px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: #d1d4dc;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.history-node:hover {
+  background: rgba(41, 98, 255, 0.10);
+  border-color: #2962ff;
+}
+.history-node.is-current {
+  border-color: #2962ff;
+  background: rgba(41, 98, 255, 0.06);
+}
+.history-dot {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--branch-exec);
+  flex-shrink: 0;
+}
+.history-dot.kind-main      { background: var(--branch-main); }
+.history-dot.kind-exec      { background: var(--branch-exec); }
+.history-dot.kind-direction { background: var(--branch-direction); }
+.history-dot.kind-sandbox   { background: var(--branch-sandbox); }
+.history-dot.kind-archived  { background: var(--branch-archived); }
+.history-node-info {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.history-node-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.history-node-role {
+  font-size: 11px;
+  color: #787b86;
+}
+.history-node-stats {
+  display: flex; flex-direction: column; gap: 2px;
+  align-items: flex-end;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.history-trade-count { color: #787b86; }
+.history-pnl { font-weight: 600; }
+.history-pnl.pos { color: #26a69a; }
+.history-pnl.neg { color: #ef5350; }
+.history-pnl.zero { color: #787b86; }
+
+/* The arrow + reason between two consecutive branch nodes — narrower
+   left margin to indent the prose under the previous row. */
+.history-arrow {
+  margin: 6px 0 6px 16px;
+  padding-left: 14px;
+  border-left: 2px solid rgba(239, 83, 80, 0.4);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.history-arrow-line {
+  color: #b2b5be;
+}
+.history-arrow-line strong { color: #ffffff; font-weight: 600; }
+.history-arrow-reason {
+  color: #d1d4dc;
+  background: rgba(239, 83, 80, 0.08);
+  padding: 6px 8px;
+  border-radius: 3px;
+  margin-top: 4px;
+  white-space: pre-line;
+}
+.history-footer-note {
+  margin: 12px 12px 6px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #787b86;
+}
+
+/* Hover-revealed action buttons inside each history-node row.
+   Same UX as the panel rows' [副圖] / [升格主線] hover buttons —
+   hidden until the row is hovered, except 「移出副圖」 which is
+   always visible (so the removal action is discoverable without
+   needing to remember the row is currently in the mini slot). */
+.history-node-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-left: 8px;
+}
+.history-node-btn {
+  background: transparent;
+  border: 1px solid #363a45;
+  color: #b2b5be;
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease,
+              border-color 120ms ease, color 120ms ease;
+}
+.history-node:hover .history-node-btn { opacity: 1; }
+.history-node-btn:hover {
+  background: #2a2e39;
+  color: #ffffff;
+  border-color: #4a4e5a;
+}
+/* 升格 button — red accent so it's visually flagged as heavy action */
+.history-node-btn.promote {
+  border-color: rgba(239, 83, 80, 0.5);
+  color: #ff8a87;
+}
+.history-node-btn.promote:hover {
+  background: rgba(239, 83, 80, 0.18);
+  color: #ffffff;
+  border-color: #ef5350;
+}
+/* When the row is the current mini, the "移出副圖" button is always
+   visible (matches branch panel convention). */
+.history-node.is-mini .history-node-btn { opacity: 1; }
+
+/* Note-editor modal — wider card + taller body textarea so users can
+   actually compose multi-paragraph notes. Header has cursor: move
+   to signal draggability (the actual JS hookup in branch_modals.js). */
+.branch-modal-card.branch-modal-note { width: 520px; max-width: 92vw; }
+.branch-modal-header-drag { cursor: move; user-select: none; }
+.branch-modal-textarea-tall {
+  min-height: 180px; resize: vertical; line-height: 1.5;
+}
+
+/* ===== Branch row context menu (Phase 5) ===== */
+#branch-row-ctx {
+  position: fixed;
+  min-width: 160px;
+  background: #1e222d;
+  border: 1px solid #363a45;
+  border-radius: 4px;
+  padding: 4px 0;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.55);
+  z-index: 800;
+  user-select: none;
+  font-size: 13px;
+}
+#branch-row-ctx[hidden] { display: none; }
+#branch-row-ctx .ctx-item {
+  display: flex; align-items: center;
+  padding: 7px 14px;
+  color: #d1d4dc;
+  cursor: pointer;
+}
+#branch-row-ctx .ctx-item:hover { background: #2a2e39; }
+#branch-row-ctx .ctx-item.danger { color: #ef5350; }
+#branch-row-ctx .ctx-item.danger:hover { background: rgba(239,83,80,0.12); }
+#branch-row-ctx .ctx-item.disabled { color: #555; pointer-events: none; }
+#branch-row-ctx .ctx-sep { height: 1px; background: #2a2e39; margin: 4px 0; }
+
+/* Note indicator — small 📝 next to the branch name when the branch
+   has a non-empty note. Native tooltip on hover via the title attr. */
+.branch-row .branch-note-icon {
+  font-size: 11px; line-height: 1;
+  margin-left: 4px;
+  cursor: help;
+  opacity: 0.7;
+}
+.branch-row .branch-note-icon:hover { opacity: 1; }
+
+/* Inline rename input — replaces .branch-name span on dblclick. */
+.branch-row .branch-name-edit {
+  background: #131722;
+  border: 1px solid #2962ff;
+  color: #fff;
+  border-radius: 3px;
+  padding: 2px 6px;
+  font: inherit;
+  width: 100%;
+  min-width: 80px;
+  outline: none;
+}
+
+/* =========================================================
+   Chart-side fork markers + tooltip (§5.2 / §5.2.1)
+   ========================================================= */
+.branch-fork-markers {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;        /* above bracket bands + lines, below modal */
+}
+.branch-fork-marker {
+  position: absolute;
+  width: 22px; height: 22px;
+  margin-left: -11px; margin-top: -11px;     /* center on (left, top) */
+  border-radius: 50%;
+  background: var(--branch-exec);
+  color: #ffffff;
+  border: 2px solid #0e1118;        /* spec §5.2 outline in chart bg */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+  box-shadow: 0 0 0 0 rgba(0,0,0,0);
+}
+.branch-fork-marker svg {
+  width: 13px; height: 13px;
+  transition: transform 120ms ease;
+}
+/* When K-bars at the marker's timestamp render ABOVE the marker (e.g.
+   chart panned so price action is in the upper half), flip the
+   chevron up so it visually points toward the bars. Driven by
+   `_positionMarkers` setting `.points-up` on the marker each frame. */
+.branch-fork-marker.points-up svg { transform: rotate(180deg); }
+.branch-fork-marker:hover {
+  transform: scale(1.18);            /* spec §5.2 hover */
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+/* Hover on a points-up marker — keep both transforms (rotate svg,
+   scale outer). svg already has rotate; outer scales independently. */
+.branch-fork-marker.kind-main      { background: var(--branch-main); }
+.branch-fork-marker.kind-exec      { background: var(--branch-exec); }
+.branch-fork-marker.kind-direction { background: var(--branch-direction); }
+.branch-fork-marker.kind-sandbox   { background: var(--branch-sandbox); }
+.branch-fork-marker.kind-archived  { background: var(--branch-archived); }
+
+/* Tooltip popover anchored next to the clicked marker */
+.branch-fork-tooltip {
+  position: absolute;
+  min-width: 240px;
+  max-width: 320px;
+  background: #1e222d;
+  border: 1px solid #363a45;
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  padding: 8px;
+  z-index: 7;
+  font-size: 12px;
+  color: #d1d4dc;
+  pointer-events: auto;
+}
+.branch-fork-tooltip[hidden] { display: none; }
+.branch-fork-tt-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: #d1d4dc;
+  padding: 4px 6px 6px;
+  border-bottom: 1px solid #2a2e39;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.branch-fork-tt-bar {
+  font-size: 10px;
+  font-weight: 400;
+  color: #5a6478;
+  font-variant-numeric: tabular-nums;
+}
+.branch-fork-tt-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.branch-fork-tt-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 0;
+  padding: 6px 6px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 2px;
+  color: inherit;
+  font: inherit;
+}
+.branch-fork-tt-row:hover { background: rgba(42, 46, 57, 0.6); }
+.branch-fork-tt-row.active {
+  background: rgba(41, 98, 255, 0.14);
+}
+.branch-fork-tt-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--branch-exec);
+}
+.branch-fork-tt-dot.kind-main      { background: var(--branch-main); }
+.branch-fork-tt-dot.kind-exec      { background: var(--branch-exec); }
+.branch-fork-tt-dot.kind-direction { background: var(--branch-direction); }
+.branch-fork-tt-dot.kind-sandbox   { background: var(--branch-sandbox); }
+.branch-fork-tt-dot.kind-archived  { background: var(--branch-archived); }
+.branch-fork-tt-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.branch-fork-tt-current {
+  color: #787b86;
+  font-size: 11px;
+  margin-left: 4px;
+}
+.branch-fork-tt-pnl {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 12px;
+}
+.branch-fork-tt-pnl.pos { color: #26a69a; }
+.branch-fork-tt-pnl.neg { color: #ef5350; }
+.branch-fork-tt-pnl.zero { color: #787b86; }
+
+/* =========================================================
+   Bar-select mode (§3.2.2) — Alt+F
+   While active: body class flips cursor to crosshair, a faint ⋎
+   ghost follows the mouse snapped to the nearest bar.
+   ========================================================= */
+body.branch-bar-select-active,
+body.branch-bar-select-active #chart,
+body.branch-bar-select-active #chart canvas {
+  cursor: crosshair !important;
+}
+body.branch-bar-select-active #btn-branch-fork {
+  background: rgba(41, 98, 255, 0.20);
+  color: #4078ff;
+}
+.branch-bar-select-preview {
+  position: absolute;
+  width: 22px; height: 22px;
+  margin-left: -11px; margin-top: -11px;
+  border-radius: 50%;
+  background: rgba(41, 98, 255, 0.30);
+  color: rgba(255, 255, 255, 0.7);
+  border: 2px dashed rgba(41, 98, 255, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 6;
+  transition: opacity 80ms ease;
+  font-weight: 600;
+  font-size: 13px;
+}
+.branch-bar-select-preview[hidden] { display: none; }
+.branch-bar-select-preview::before {
+  content: '⋎';
+}
+
+/* =========================================================
+   Trade history bottom drawer (sim_history.js)
+   TradingView-style 交易清單. Two visual rows per trade
+   (entry + exit) with branch-aware filtering.
+   ========================================================= */
+#sim-history-panel {
+  /* Flex sibling of #chart inside #chart-area (sim_history.init()
+     appends this element into #chart-area on boot). Fixed height,
+     no shrinking — chart picks up the remainder via flex: 1. */
+  flex: 0 0 auto;
+  height: 38vh;
+  min-height: 220px;
+  max-height: 60vh;
+  background: #131722;
+  border-top: 1px solid #2a2e39;
+  display: flex;
+  flex-direction: column;
+  font-family: "Noto Sans TC", system-ui, sans-serif;
+  color: #d1d4dc;
+}
+#sim-history-panel[hidden] { display: none; }
+
+.sim-history-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #2a2e39;
+  flex-shrink: 0;
+}
+.sim-history-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffffff;
+}
+.sim-history-summary {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 12px;
+  color: #787b86;
+}
+.sim-history-summary-label {
+  color: #d1d4dc;
+}
+.sim-history-summary-total {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.sim-history-summary-total.pos { color: #26a69a; }
+.sim-history-summary-total.neg { color: #ef5350; }
+.sim-history-summary-total.zero { color: #787b86; }
+.sim-history-close {
+  background: transparent;
+  border: 0;
+  color: #787b86;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 8px;
+}
+.sim-history-close:hover { color: #ffffff; }
+
+/* §4o toolbar — 清除 / 下載 buttons in the drawer header */
+.sim-history-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.sim-history-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid #363a45;
+  color: #b2b5be;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 9px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.sim-history-actions button:hover {
+  background: #2a2e39;
+  color: #ffffff;
+  border-color: #4a4e5a;
+}
+.sim-history-actions .sim-history-clear:hover {
+  border-color: #ef5350;
+  color: #ff8a87;
+}
+
+/* Per-row ✕ — appears on row hover (kept hidden otherwise so the
+   row stays clean during reading). data-pos-id stamped from JS. */
+.sim-history-row-action {
+  width: 36px;
+  text-align: center;
+  vertical-align: middle;
+}
+.sim-history-row-delete {
+  background: transparent;
+  border: 0;
+  color: #787b86;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+}
+.sim-history-trade:hover .sim-history-row-delete { opacity: 1; }
+.sim-history-row-delete:hover {
+  background: rgba(239, 83, 80, 0.18);
+  color: #ff8a87;
+}
+
+/* Modal (confirm + export-pick). Reusable container at body level —
+   one per Panel (lazy-created on first use). Backdrop is transparent
+   so the chart stays visible while the modal is up. Click anywhere
+   outside the card (incl. on the chart) closes the modal. */
+#sim-history-modal-root {
+  position: fixed;
+  inset: 0;
+  z-index: 10500;
+}
+#sim-history-modal-root[hidden] { display: none; }
+.sim-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: transparent;
+  /* pointer-events stay on so the layer captures outside-click;
+     visually invisible. */
+}
+.sim-modal-card {
+  position: absolute;
+  top: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 360px;
+  max-width: 480px;
+  background: #1e222d;
+  border: 1px solid #363a45;
+  border-radius: 6px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  color: #d1d4dc;
+  display: flex;
+  flex-direction: column;
+}
+.sim-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid #2a2e39;
+  cursor: move;
+  user-select: none;
+}
+.sim-modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #ffffff;
+}
+.sim-modal-close {
+  background: transparent;
+  border: 0;
+  color: #787b86;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+.sim-modal-close:hover {
+  background: rgba(239, 83, 80, 0.18);
+  color: #ff8a87;
+}
+.sim-modal-content {
+  padding: 16px 18px 14px;
+}
+.sim-modal-body {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #b2b5be;
+  margin-bottom: 14px;
+  white-space: pre-line;
+}
+.sim-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.sim-modal-actions button {
+  background: transparent;
+  border: 1px solid #363a45;
+  color: #d1d4dc;
+  font-size: 12px;
+  padding: 6px 14px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.sim-modal-actions .sim-modal-cancel:hover {
+  background: #2a2e39;
+  border-color: #4a4e5a;
+}
+.sim-modal-actions .sim-modal-primary {
+  background: #2962ff;
+  border-color: #2962ff;
+  color: #ffffff;
+}
+.sim-modal-actions .sim-modal-primary:hover {
+  background: #1c4ed8;
+  border-color: #1c4ed8;
+}
+.sim-modal-actions .sim-modal-primary.danger {
+  background: #ef5350;
+  border-color: #ef5350;
+}
+.sim-modal-actions .sim-modal-primary.danger:hover {
+  background: #d63a37;
+  border-color: #d63a37;
+}
+
+/* Export-pick choice list — vertical stack of clickable cards. */
+.sim-modal-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.sim-modal-choice {
+  text-align: left;
+  background: #131722;
+  border: 1px solid #363a45;
+  color: #d1d4dc;
+  padding: 10px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.sim-modal-choice:hover,
+.sim-modal-choice:focus {
+  background: rgba(41, 98, 255, 0.12);
+  border-color: #2962ff;
+  outline: 0;
+}
+.sim-modal-choice-label {
+  font-size: 13px;
+  color: #ffffff;
+  margin-bottom: 2px;
+}
+.sim-modal-choice-desc {
+  font-size: 11px;
+  color: #787b86;
+}
+
+/* Tiny toast for "xlsx not loaded yet" / "no trades to clear" */
+#sim-history-toast {
+  position: fixed;
+  bottom: 32px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1e222d;
+  border: 1px solid #363a45;
+  color: #d1d4dc;
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  z-index: 11000;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+}
+#sim-history-toast.show { opacity: 1; }
+
+.sim-history-body {
+  flex: 1;
+  overflow: auto;
+}
+
+.sim-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.sim-history-table thead {
+  position: sticky;
+  top: 0;
+  background: #1e222d;
+  z-index: 1;
+}
+.sim-history-table th {
+  padding: 8px 10px;
+  text-align: left;
+  font-weight: 500;
+  color: #787b86;
+  border-bottom: 1px solid #2a2e39;
+  white-space: nowrap;
+}
+.sim-history-table th.sim-history-price,
+.sim-history-table th.sim-history-size,
+.sim-history-table th.sim-history-pl,
+.sim-history-table th.sim-history-mfe,
+.sim-history-table th.sim-history-mae,
+.sim-history-table th.sim-history-cum {
+  text-align: right;
+}
+
+.sim-history-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #2a2e39;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* Each trade is one <tr>. Two stacked <div>s per cell (出場 on top,
+   進場 on bottom). Explicit line-height + a small inter-line gap keeps
+   the lines visually aligned across all columns of a trade. */
+.sim-history-trade td > div {
+  line-height: 16px;
+  min-height: 16px;
+}
+.sim-history-trade td > div.line-top {
+  color: #d1d4dc;
+}
+.sim-history-trade td > div.line-bot {
+  margin-top: 3px;
+}
+/* "Per-leg" columns (date/order-type/price): both lines same color/size. */
+.sim-history-trade .sim-history-time .line-bot,
+.sim-history-trade .sim-history-ordertype .line-bot,
+.sim-history-trade .sim-history-price .line-bot {
+  color: #d1d4dc;
+  font-size: 12px;
+}
+/* "Aggregate" columns: bottom line is hierarchical (smaller, dimmer). */
+.sim-history-trade .line-bot.notional,
+.sim-history-trade .line-bot.pct {
+  font-size: 10px;
+  color: #5a6478;
+  opacity: 0.95;
+}
+.sim-history-trade .line-top {
+  font-size: 12px;
+}
+.sim-history-trade .unit {
+  font-size: 10px;
+  color: #5a6478;
+  font-weight: 400;
+}
+
+/* Specific column tints */
+.sim-history-num .idx { color: #d1d4dc; font-weight: 500; }
+.sim-history-num .side {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-size: 10px;
+  font-weight: 500;
+}
+.sim-history-num .side.long  { background: rgba(38,166,154,0.18); color: #4ad9b6; }
+.sim-history-num .side.short { background: rgba(239,83,80,0.18);  color: #ff8a87; }
+
+.sim-history-time      { color: #d1d4dc; font-variant-numeric: tabular-nums; }
+.sim-history-ordertype { color: #787b86; font-size: 11px; }
+.sim-history-price     { text-align: right; color: #d1d4dc; font-variant-numeric: tabular-nums; }
+.sim-history-size      { text-align: right; color: #d1d4dc; font-variant-numeric: tabular-nums; }
+
+.sim-history-pl {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.sim-history-pl.pos  .line-top,
+.sim-history-pl.pos  .line-bot { color: #26a69a; }
+.sim-history-pl.neg  .line-top,
+.sim-history-pl.neg  .line-bot { color: #ef5350; }
+.sim-history-pl.zero .line-top,
+.sim-history-pl.zero .line-bot { color: #787b86; }
+
+.sim-history-mfe {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.sim-history-mfe .line-top { color: #26a69a; }
+
+.sim-history-mae {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.sim-history-mae .line-top { color: #ef5350; }
+
+.sim-history-cum {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.sim-history-cum.pos  .line-top,
+.sim-history-cum.pos  .line-bot { color: #26a69a; }
+.sim-history-cum.neg  .line-top,
+.sim-history-cum.neg  .line-bot { color: #ef5350; }
+.sim-history-cum.zero .line-top,
+.sim-history-cum.zero .line-bot { color: #787b86; }
+
+.sim-history-branch {
+  /* Single-line cell — center vertically across the 2-line row height
+     so the dot + name sit neatly in the middle. */
+}
+.sim-history-branch-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--branch-main);
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.sim-history-branch-name {
+  color: #d1d4dc;
+  font-size: 11px;
+  vertical-align: middle;
+}
+
+.sim-history-empty td {
+  text-align: center;
+  color: #5a6478;
+  padding: 24px;
+  font-size: 12px;
+}
+
+/* Active toolbar button highlight */
+#btn-sim-history.active {
+  background: rgba(41, 98, 255, 0.18);
+  color: #4078ff;
+}

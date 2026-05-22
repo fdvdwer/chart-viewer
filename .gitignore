@@ -1,0 +1,36 @@
+# Historical OHLCV data — too big for Git, user-provided per install
+market_data/
+**/market_data/_cache/
+
+# Per-user state — drawings, layouts, branch sessions, symbol overrides
+chart_viewer/user_data/
+chart_viewer/config.json
+chart_viewer/symbol_specs.json
+
+# Electron build artefacts
+chart_viewer_app/node_modules/
+chart_viewer_app/dist/
+chart_viewer_app/package-lock.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Cached parsed OHLCV (regenerated from .txt on launch)
+*.cache.pkl
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo

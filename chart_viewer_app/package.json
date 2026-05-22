@@ -1,0 +1,52 @@
+{
+  "name": "chart-viewer-app",
+  "version": "0.1.5",
+  "description": "Chart Viewer — desktop wrapper",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.aaronyuan.chartviewer",
+    "productName": "Chart_Viewer",
+    "files": [
+      "main.js",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../chart_viewer",
+        "to": "chart_viewer",
+        "filter": [
+          "**/*",
+          "!__pycache__",
+          "!*.pyc",
+          "!*.pyo",
+          "!config.json",
+          "!user_data/**",
+          "!PROGRESS.md",
+          "!docs/**",
+          "!start.bat",
+          "!README.md",
+          "!static/test_*.js",
+          "!**/.DS_Store"
+        ]
+      }
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.finance"
+    }
+  }
+}

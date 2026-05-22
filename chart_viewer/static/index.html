@@ -1,0 +1,1617 @@
+<!DOCTYPE html>
+<!-- Default lang attribute matches the new English-default in
+     i18n.js (_initialLang fallback) and server.py (DEFAULT_CONFIG).
+     i18n.js IIFE rewrites this to 'zh-TW' if the user has previously
+     saved zh in localStorage. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Chart_Viewer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <!-- i18n must load BEFORE any module that calls window.I18n.t at
+       module-init time. Keep this tag first among <script>s. -->
+  <script src="i18n.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/klinecharts@9.8.10/dist/umd/klinecharts.min.js"></script>
+  <!-- SheetJS — used by 交易清單 to export trade history as .xlsx
+       (per branch / merged multi-sheet). Loaded async so the chart
+       boots without waiting for it; SimHistory checks for `XLSX`
+       at click-time and falls back to a polite error if not yet
+       ready (slow network). -->
+  <script async src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+
+<!-- ========== Layouts home screen (hidden when a layout is open) ========== -->
+<div id="layouts-home" class="hidden">
+  <div class="lh-inner">
+    <h1 class="lh-title" data-i18n="topbar.appTitle">超級圖表</h1>
+    <div class="lh-grid" id="lh-grid">
+      <!-- Create-new card -->
+      <button class="lh-card lh-new" id="lh-new-btn">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+        <span data-i18n="dlg.layoutNewTitle">建立新版面</span>
+      </button>
+      <!-- Existing layout cards injected here -->
+    </div>
+  </div>
+</div>
+
+<!-- ========== Layout name dialog (create / rename) ========== -->
+<div id="layout-name-dialog" class="hidden">
+  <div class="lnd-backdrop"></div>
+  <div class="lnd-modal">
+    <header>
+      <!-- Title text is set dynamically by app.js (create vs rename) — i18n
+           keys dlg.layoutNewTitle / dlg.layoutRenameTitle handled there. -->
+      <span class="title" id="lnd-title">建立新版面</span>
+      <button class="close-btn" id="lnd-close" data-i18n-title="common.close" title="關閉">✕</button>
+    </header>
+    <label class="lnd-label" data-i18n="dlg.layoutNameLabel">版面名稱</label>
+    <input type="text" id="lnd-input" autocomplete="off"
+           data-i18n-placeholder="dlg.layoutNamePlaceholder" placeholder="我的版面">
+    <div class="lnd-actions">
+      <button class="rd-secondary" id="lnd-cancel" data-i18n="common.cancel">取消</button>
+      <!-- Primary button label flips between Create / Save in dialog flow;
+           static fallback "建立" is the create-mode default. -->
+      <button class="rd-primary" id="lnd-confirm" disabled data-i18n="dlg.layoutNewBtn">建立</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Layout tab bar (browser-style) ========== -->
+<nav id="tab-bar">
+  <div class="tabs-scroll" id="tabs-scroll"></div>
+  <button class="tab-add" id="tab-add-btn" data-i18n-title="topbar.newTab" title="新分頁">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+  </button>
+</nav>
+
+<!-- ========== Top toolbar ========== -->
+<header id="topbar">
+  <div class="topbar-left">
+    <span class="symbol">NQ1!</span>
+    <span class="sep"></span>
+    <button class="tf-btn" id="tf-display">15m</button>
+    <span class="sep"></span>
+    <button class="topbar-btn" id="btn-replay" data-i18n-title="topbar.replayTooltip" title="重播 (R)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polygon points="11 5 6 12 11 19"/><polygon points="19 5 14 12 19 19"/>
+      </svg>
+      <span data-i18n="topbar.replay">重播</span>
+    </button>
+    <!-- branching-replay-spec §5.1: branch pill — current branch's
+         display name, kind-color tinted. Hidden until BranchPanel
+         decides to show it (only when branches.length > 1, otherwise
+         clutter for single-branch users). The optional ⚠×N
+         contamination badge appears inside after Phase 6. -->
+    <span class="branch-pill" id="branch-pill" hidden>
+      <span class="branch-pill-dot" aria-hidden="true"></span>
+      <!-- Pill name is set programmatically by branch_panel.js — the
+           static "主線" fallback is the default-branch label. Per spec
+           §4.4 only the auto-generated default name is translated;
+           user-renamed branches stay verbatim. -->
+      <span class="branch-pill-name">主線</span>
+      <span class="branch-pill-contam" hidden></span>
+    </span>
+  </div>
+  <div class="topbar-right">
+    <span class="data-range" id="data-range"></span>
+    <!-- Data folder access — open the market_data folder in the OS file
+         explorer (helpful on macOS where the folder lives under ~/Library)
+         and full-reload the cache from disk after the user drops new files. -->
+    <button class="topbar-btn" id="btn-open-data" data-i18n-title="topbar.openDataFolderTooltip" title="開啟資料夾">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+      </svg>
+    </button>
+    <button class="topbar-btn" id="btn-reload-data" data-i18n-title="topbar.reloadDataTooltip" title="重新載入資料">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="23 4 23 10 17 10"/>
+        <polyline points="1 20 1 14 7 14"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+    </button>
+    <button class="topbar-btn" id="btn-layouts" data-i18n-title="topbar.layoutsTooltip" title="版面">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <rect x="3" y="3" width="7" height="7"/>
+        <rect x="14" y="3" width="7" height="7"/>
+        <rect x="3" y="14" width="7" height="7"/>
+        <rect x="14" y="14" width="7" height="7"/>
+      </svg>
+    </button>
+    <button class="topbar-btn" id="btn-sim" data-i18n-title="topbar.placeOrderTooltip" title="下單 (B / S)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <path d="M3 12h6l3-9 3 18 3-9h3"/>
+      </svg>
+      <span data-i18n="topbar.placeOrder">下單</span>
+    </button>
+    <!-- Trade history bottom drawer (TradingView 交易清單). Toggled
+         via this button or hotkey 'T'. Branch-aware: the table shows
+         only trades visible to the active branch (own + inherited
+         per spec §2.1). -->
+    <button class="topbar-btn" id="btn-sim-history" data-i18n-title="topbar.tradeHistoryTooltip" title="交易歷史 (T)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="3" y1="6"  x2="21" y2="6"/>
+        <line x1="3" y1="12" x2="21" y2="12"/>
+        <line x1="3" y1="18" x2="14" y2="18"/>
+      </svg>
+      <span data-i18n="topbar.tradeHistory">交易歷史</span>
+    </button>
+    <button class="topbar-btn" id="btn-obj-tree" data-i18n-title="topbar.objectTreeTooltip" title="物件樹">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <rect x="3" y="4" width="6" height="6" rx="1"/>
+        <rect x="3" y="14" width="6" height="6" rx="1"/>
+        <rect x="15" y="14" width="6" height="6" rx="1"/>
+        <line x1="9" y1="7" x2="15" y2="7"/>
+        <line x1="15" y1="7" x2="15" y2="17"/>
+        <line x1="9" y1="17" x2="15" y2="17"/>
+      </svg>
+    </button>
+    <!-- branching-replay-spec §5.1: 「⋎ 在此分支」 button. Opens the
+         manual-fork modal targeting the current cursor (replay
+         cursor in replay mode, latest bar otherwise). Alt+F enters
+         bar-select mode (click any bar to fork from there). -->
+    <button class="topbar-btn" id="btn-branch-fork" data-i18n-title="topbar.forkHereTooltip" title="在此分支 (Alt+F 選擇 K 棒)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 4 L12 14 L19 4"/>
+        <line x1="12" y1="14" x2="12" y2="20"/>
+      </svg>
+      <span data-i18n="topbar.forkHere">在此分支</span>
+    </button>
+    <!-- branching-replay-spec §5.1: 分支管理 toolbar button. Toggles the
+         right-side branch panel. -->
+    <button class="topbar-btn" id="btn-branch-panel" data-i18n-title="topbar.branchesTooltip" title="分支管理">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <circle cx="6" cy="6" r="2"/>
+        <circle cx="6" cy="18" r="2"/>
+        <circle cx="18" cy="12" r="2"/>
+        <path d="M6 8 v8 M8 6 q10 0 10 6"/>
+      </svg>
+      <span data-i18n="topbar.branches">分支</span>
+    </button>
+  </div>
+</header>
+
+<!-- ========== Main area ========== -->
+<main id="main">
+  <!-- Left drawing toolbar — TradingView-style collapsible groups.
+       Each .tool-group has ONE trigger button (shows the last-selected
+       tool's icon) and a popup with all tools in the group. Clicking a
+       trigger toggles its popup; clicking a popup item activates the
+       tool, closes the popup, and swaps the trigger icon to that tool.
+       Groups (TV taxonomy, condensed for our scope):
+         • Trend & shapes  — trendline, rectangle, path
+         • Fibonacci       — retracement, extension
+         • Forecast & measure — measure, long/short position
+       Singletons (no group): cursor, position-settings, clear-all.
+       SVG icons inside triggers all live in the DOM; CSS hides every
+       one except `data-icon-for === currentTool` so swapping is just
+       classList — no innerHTML churn. -->
+  <aside id="leftbar">
+    <!-- Singleton: Cursor -->
+    <button class="tool-btn" data-tool="cross" data-i18n-title="tool.cross" title="十字線（無工具）">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <line x1="12" y1="2" x2="12" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/>
+      </svg>
+    </button>
+
+    <!-- Group: Trend & shapes (trendline / rectangle / path) -->
+    <div class="tool-group" data-group="trend">
+      <button class="tool-btn tool-group-trigger" data-i18n-title="tool.group.trendTooltip" title="趨勢線工具">
+        <svg data-icon-for="trendline" class="active" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <line x1="4" y1="20" x2="20" y2="4"/>
+          <circle cx="4" cy="20" r="1.5" fill="currentColor"/>
+          <circle cx="20" cy="4" r="1.5" fill="currentColor"/>
+        </svg>
+        <svg data-icon-for="rectangle" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="4" y="6" width="16" height="12"/>
+        </svg>
+        <svg data-icon-for="path" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <polyline points="3 18 9 10 14 14 21 4"/>
+          <circle cx="3" cy="18" r="1.5" fill="currentColor"/>
+          <circle cx="9" cy="10" r="1.5" fill="currentColor"/>
+          <circle cx="14" cy="14" r="1.5" fill="currentColor"/>
+          <circle cx="21" cy="4" r="1.5" fill="currentColor"/>
+        </svg>
+      </button>
+      <div class="tool-group-popup hidden" data-group="trend">
+        <div class="tool-popup-header" data-i18n="tool.group.trend">趨勢線工具</div>
+        <button class="tool-popup-item" data-tool="trendline">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <line x1="4" y1="20" x2="20" y2="4"/>
+            <circle cx="4" cy="20" r="1.5" fill="currentColor"/>
+            <circle cx="20" cy="4" r="1.5" fill="currentColor"/>
+          </svg>
+          <span class="popup-tool-name" data-i18n="tool.trendline">趨勢線</span>
+          <span class="popup-tool-hotkey">Alt + T</span>
+        </button>
+        <button class="tool-popup-item" data-tool="rectangle">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="4" y="6" width="16" height="12"/>
+          </svg>
+          <span class="popup-tool-name" data-i18n="tool.rectangle">矩形</span>
+          <span class="popup-tool-hotkey">Alt + R</span>
+        </button>
+        <button class="tool-popup-item" data-tool="path">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polyline points="3 18 9 10 14 14 21 4"/>
+            <circle cx="3" cy="18" r="1.5" fill="currentColor"/>
+            <circle cx="9" cy="10" r="1.5" fill="currentColor"/>
+            <circle cx="14" cy="14" r="1.5" fill="currentColor"/>
+            <circle cx="21" cy="4" r="1.5" fill="currentColor"/>
+          </svg>
+          <span class="popup-tool-name" data-i18n="tool.path">路徑</span>
+          <span class="popup-tool-hotkey">Alt + P</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Group: Fibonacci (retrace / extension) -->
+    <div class="tool-group" data-group="fibonacci">
+      <button class="tool-btn tool-group-trigger" data-i18n-title="tool.group.fiboTooltip" title="費波那契工具">
+        <svg data-icon-for="fibo-retrace" class="active" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+          <line x1="3" y1="5" x2="21" y2="5"/>
+          <line x1="3" y1="9" x2="21" y2="9" stroke-opacity="0.7"/>
+          <line x1="3" y1="13" x2="21" y2="13" stroke-opacity="0.55"/>
+          <line x1="3" y1="17" x2="21" y2="17" stroke-opacity="0.7"/>
+          <line x1="3" y1="21" x2="21" y2="21"/>
+        </svg>
+        <svg data-icon-for="fibo-extension" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+          <polyline points="3 18 9 6 14 14" stroke-dasharray="2 2"/>
+          <line x1="14" y1="6" x2="21" y2="6" stroke-opacity="0.55"/>
+          <line x1="14" y1="10" x2="21" y2="10" stroke-opacity="0.7"/>
+          <line x1="14" y1="14" x2="21" y2="14"/>
+          <line x1="14" y1="18" x2="21" y2="18" stroke-opacity="0.7"/>
+        </svg>
+      </button>
+      <div class="tool-group-popup hidden" data-group="fibonacci">
+        <div class="tool-popup-header" data-i18n="tool.group.fibo">斐波那契</div>
+        <button class="tool-popup-item" data-tool="fibo-retrace">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+            <line x1="3" y1="5" x2="21" y2="5"/>
+            <line x1="3" y1="9" x2="21" y2="9" stroke-opacity="0.7"/>
+            <line x1="3" y1="13" x2="21" y2="13" stroke-opacity="0.55"/>
+            <line x1="3" y1="17" x2="21" y2="17" stroke-opacity="0.7"/>
+            <line x1="3" y1="21" x2="21" y2="21"/>
+          </svg>
+          <span class="popup-tool-name" data-i18n="tool.fiboRetrace">斐波那契回撤</span>
+          <span class="popup-tool-hotkey">Alt + F</span>
+        </button>
+        <button class="tool-popup-item" data-tool="fibo-extension">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+            <polyline points="3 18 9 6 14 14" stroke-dasharray="2 2"/>
+            <line x1="14" y1="6" x2="21" y2="6" stroke-opacity="0.55"/>
+            <line x1="14" y1="10" x2="21" y2="10" stroke-opacity="0.7"/>
+            <line x1="14" y1="14" x2="21" y2="14"/>
+            <line x1="14" y1="18" x2="21" y2="18" stroke-opacity="0.7"/>
+          </svg>
+          <span class="popup-tool-name" data-i18n="tool.fiboExtension">斐波那契趨勢擴展</span>
+          <span class="popup-tool-hotkey">Alt + E</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Group: Forecast & measurement (measure / long / short positions) -->
+    <div class="tool-group" data-group="forecast">
+      <button class="tool-btn tool-group-trigger" data-i18n-title="tool.group.forecastTooltip" title="預測與測量">
+        <svg data-icon-for="measure" class="active" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="4" y="4" width="16" height="16" rx="1"/>
+          <line x1="12" y1="7" x2="12" y2="17"/>
+          <line x1="7" y1="12" x2="17" y2="12"/>
+          <polyline points="10 9 12 7 14 9"/>
+          <polyline points="15 10 17 12 15 14"/>
+        </svg>
+        <svg data-icon-for="long-position" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+          <circle cx="6" cy="7" r="2"/>
+          <rect x="9" y="4" width="11" height="6" fill="#26a69a" fill-opacity="0.4" stroke="none"/>
+          <line x1="9" y1="13" x2="20" y2="13" stroke="currentColor" stroke-dasharray="2 2"/>
+          <text x="6" y="11" font-size="6" fill="currentColor" stroke="none" text-anchor="middle">L</text>
+          <rect x="9" y="14" width="11" height="6" fill="#ef5350" fill-opacity="0.4" stroke="none"/>
+        </svg>
+        <svg data-icon-for="short-position" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+          <rect x="9" y="4" width="11" height="6" fill="#ef5350" fill-opacity="0.4" stroke="none"/>
+          <line x1="9" y1="13" x2="20" y2="13" stroke="currentColor" stroke-dasharray="2 2"/>
+          <circle cx="6" cy="13" r="2"/>
+          <text x="6" y="17" font-size="6" fill="currentColor" stroke="none" text-anchor="middle">S</text>
+          <rect x="9" y="14" width="11" height="6" fill="#26a69a" fill-opacity="0.4" stroke="none"/>
+        </svg>
+      </button>
+      <div class="tool-group-popup hidden" data-group="forecast">
+        <div class="tool-popup-header" data-i18n="tool.group.forecast">預測與測量</div>
+        <button class="tool-popup-item" data-tool="measure">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="4" y="4" width="16" height="16" rx="1"/>
+            <line x1="12" y1="7" x2="12" y2="17"/>
+            <line x1="7" y1="12" x2="17" y2="12"/>
+            <polyline points="10 9 12 7 14 9"/>
+            <polyline points="15 10 17 12 15 14"/>
+          </svg>
+          <span class="popup-tool-name" data-i18n="tool.measure">日期與價格範圍</span>
+          <span class="popup-tool-hotkey">Alt + M</span>
+        </button>
+        <button class="tool-popup-item" data-tool="long-position">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+            <circle cx="6" cy="7" r="2"/>
+            <rect x="9" y="4" width="11" height="6" fill="#26a69a" fill-opacity="0.4" stroke="none"/>
+            <line x1="9" y1="13" x2="20" y2="13" stroke="currentColor" stroke-dasharray="2 2"/>
+            <text x="6" y="11" font-size="6" fill="currentColor" stroke="none" text-anchor="middle">L</text>
+            <rect x="9" y="14" width="11" height="6" fill="#ef5350" fill-opacity="0.4" stroke="none"/>
+          </svg>
+          <span class="popup-tool-name" data-i18n="tool.longPosition">多頭部位</span>
+          <span class="popup-tool-hotkey">Alt + L</span>
+        </button>
+        <button class="tool-popup-item" data-tool="short-position">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+            <rect x="9" y="4" width="11" height="6" fill="#ef5350" fill-opacity="0.4" stroke="none"/>
+            <line x1="9" y1="13" x2="20" y2="13" stroke="currentColor" stroke-dasharray="2 2"/>
+            <circle cx="6" cy="13" r="2"/>
+            <text x="6" y="17" font-size="6" fill="currentColor" stroke="none" text-anchor="middle">S</text>
+            <rect x="9" y="14" width="11" height="6" fill="#26a69a" fill-opacity="0.4" stroke="none"/>
+          </svg>
+          <span class="popup-tool-name" data-i18n="tool.shortPosition">空頭部位</span>
+          <span class="popup-tool-hotkey">Alt + S</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Singleton: Position-tool settings -->
+    <button class="tool-btn" id="btn-position-settings" data-i18n-title="tool.positionSettings" title="部位工具設定">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+
+    <div class="leftbar-spacer"></div>
+
+    <!-- Singleton: Trash (clear all) -->
+    <button class="tool-btn danger" id="btn-clear-all" data-i18n-title="tool.clearAll" title="清除全部">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <polyline points="3 6 5 6 21 6"/>
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+      </svg>
+    </button>
+  </aside>
+
+  <!-- Chart -->
+  <div id="chart-area">
+    <div id="chart"></div>
+
+    <!-- ========== Mini chart (branching-replay-spec §5.4) ==========
+         Compact secondary chart below the main chart. Shows the
+         branch designated by `BranchEngine.miniBranchId`. Same K-bar
+         data as main; visual difference is in trade markers + fork
+         line (Phase 4b). Hidden until a branch is set into the mini
+         slot via the panel's 「放迷你」 button. -->
+    <aside id="mini-chart-panel" hidden>
+      <!-- Drag handle to resize the mini panel vertically. mousedown
+           on this thin strip starts a drag that adjusts the panel's
+           height; main chart re-measures on mouseup. -->
+      <div class="mini-chart-resize" title="拖曳調整高度"></div>
+      <header class="mini-chart-header">
+        <span class="mini-pill"></span>
+        <!-- mini-name set programmatically by mini_chart.js — same
+             "main branch" translation rule as branch-pill (spec §4.4). -->
+        <span class="mini-name"></span>
+        <span class="mini-meta"></span>
+        <span class="mini-pnl"></span>
+        <button class="mini-close" type="button" data-i18n-title="common.close" title="關閉">✕</button>
+      </header>
+      <div id="mini-chart" class="mini-chart-body">
+        <!-- Fork-bar marker — purple vertical line at the branch's
+             forkBarTimestamp showing where it diverged from its
+             parent. ⋎ glyph at the top makes it self-explanatory
+             (matches the fork marker style on the main chart).
+             JS positions `left` each frame. -->
+        <div class="mini-forkbar-line" hidden>
+          <span class="mini-forkbar-glyph">⋎</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Floating drawing tool quick-switch (appears when a tool is active) -->
+    <div id="tool-quickbar" class="hidden">
+      <span class="quickbar-handle">⋮⋮</span>
+      <button class="quick-btn" data-tool="path" data-i18n-title="tool.path" title="路徑">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="3 18 9 10 14 14 21 4"/>
+        </svg>
+      </button>
+      <button class="quick-btn" data-tool="rectangle" data-i18n-title="tool.rectangle" title="矩形">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="4" y="6" width="16" height="12"/>
+        </svg>
+      </button>
+      <button class="quick-btn" data-tool="trendline" data-i18n-title="tool.trendline" title="趨勢線">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="4" y1="20" x2="20" y2="4"/>
+        </svg>
+      </button>
+      <button class="quick-btn" data-tool="measure" data-i18n-title="tool.measure" title="日期與價格範圍">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="4" y="4" width="16" height="16" rx="1"/>
+          <line x1="12" y1="7" x2="12" y2="17"/>
+          <line x1="7" y1="12" x2="17" y2="12"/>
+        </svg>
+      </button>
+      <button class="quick-btn" data-tool="long-position" data-i18n-title="tool.longPosition" title="多頭部位">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="4" y="4" width="16" height="8" fill="#26a69a" fill-opacity="0.4" stroke="none"/>
+          <rect x="4" y="12" width="16" height="8" fill="#ef5350" fill-opacity="0.4" stroke="none"/>
+          <line x1="4" y1="12" x2="20" y2="12" stroke="currentColor" stroke-dasharray="2 2"/>
+        </svg>
+      </button>
+      <button class="quick-btn" data-tool="short-position" data-i18n-title="tool.shortPosition" title="空頭部位">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="4" y="4" width="16" height="8" fill="#ef5350" fill-opacity="0.4" stroke="none"/>
+          <rect x="4" y="12" width="16" height="8" fill="#26a69a" fill-opacity="0.4" stroke="none"/>
+          <line x1="4" y1="12" x2="20" y2="12" stroke="currentColor" stroke-dasharray="2 2"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Snap status indicator (shown when Ctrl is held) -->
+    <div id="snap-indicator" class="hidden">SNAP</div>
+
+    <!-- ========== Bracket vertical rail + dots (spec: bracket-ux-polish §3) ==========
+         Vertical guide rail between the badges and the price axis. JS
+         positions the dots' top coords from convertToPixel of the
+         TP / entry / SL prices each time SimOverlays.sync runs. The
+         rail itself stays at right:75px. Hidden via [hidden] when
+         proposal is armed (or absent); JS toggles. -->
+    <div id="sim-bracket-rail" class="sim-bracket-rail" hidden>
+      <div class="sim-rail-line"></div>
+      <div class="sim-rail-dot tp"    data-leg="tp"></div>
+      <div class="sim-rail-dot entry" data-leg="entry"></div>
+      <div class="sim-rail-dot sl"    data-leg="sl"></div>
+    </div>
+
+    <!-- ========== Pending-order tickets (limit / stop / stop-limit) ==========
+         DOM-rendered tickets for non-market pending orders. Same visual
+         language as the entry ticket: blue for buy, red for sell, with
+         a `[買入]` or `[賣出]` button on the left + the order body
+         `[« qty] [限價/停損] [×]` on the right. Vertically draggable to
+         change the order's price (sim_panel._wirePendingTicketDrag).
+         Container is absolutely positioned over #chart-area; each child
+         ticket's `top` is set per-frame from convertToPixel(price). -->
+    <div id="sim-pending-tickets" class="sim-pending-tickets" hidden></div>
+
+    <!-- ========== Branch fork markers (branching-replay-spec §5.2) ==========
+         One ⋎ marker per fork bar. Clicking opens a tooltip popover
+         listing branches that fork from that bar (§5.2.1). DOM children
+         are absolutely positioned over #chart-area at (barX, midY);
+         positions update via the rAF loop in branch_panel so they
+         track chart pan / zoom. -->
+    <div id="branch-fork-markers" class="branch-fork-markers"></div>
+
+    <!-- Tooltip popover for fork markers (single shared element). -->
+    <div id="branch-fork-tooltip" class="branch-fork-tooltip" hidden></div>
+
+    <!-- Bar-select mode preview (§3.2.2): faint ⋎ ghost that follows
+         the mouse, snapped to the nearest bar. Visible only while
+         BranchController is in bar-select mode (Alt+F). -->
+    <div id="branch-bar-select-preview" class="branch-bar-select-preview" hidden></div>
+
+    <!-- ========== Bracket tickets (spec: bracket-ux-polish §2) ==========
+         Three TradingView-style ticket pills, one per leg, positioned
+         at right:110px (between rail at 75px and chart edge). DOM-
+         rendered (not KLineChart figures) so the 3-segment layout with
+         1px accent-color separators is straightforward.
+         - TP / SL: outlined pill in accent color
+         - Entry : solid blue fill with white text + inline action group
+                   (↕ / 捨棄 / 確認) tucked inside on the LEFT
+         JS positions each ticket's `top` from convertToPixel(price),
+         toggles `[hidden]` per leg-enabled, and adds `.invalid` class
+         driven by Panel.refreshValidity. -->
+    <div id="sim-bracket-tickets" class="sim-bracket-tickets" hidden>
+      <div class="sim-ticket tp" data-leg="tp" hidden>
+        <span class="sim-ticket-warn" hidden data-i18n-title="sim.tooltipWarnTp" title="目標價格已穿過當前K棒">!</span>
+        <button class="seg seg-qty" type="button" tabindex="-1">
+          <span class="chev">«</span><span class="qty">1</span>
+        </button>
+        <div class="seg seg-pl"><span class="pl">+0.00 USD</span></div>
+        <button class="seg seg-x" type="button" tabindex="-1" data-i18n-title="sim.tooltipCancelTp" title="取消停利">×</button>
+      </div>
+      <div class="sim-ticket entry" data-leg="entry" hidden>
+        <div class="entry-actions" id="sim-bracket-actions" hidden>
+          <button class="sim-inline-flip" type="button" data-i18n-title="sim.flipReverseLong" title="平倉反手 (TODO)">↕</button>
+          <button class="sim-inline-discard" type="button" data-i18n="sim.btnDiscard">捨棄</button>
+          <button class="sim-inline-confirm" type="button" data-i18n="sim.btnConfirm">確認</button>
+          <!-- Drop sources for empty TP / SL legs (tp-sl-drop-spec §2).
+               Mousedown begins a drag; ghost mini-ticket follows the
+               cursor; release at a price drops the full ticket there.
+               Visible iff the corresponding leg is empty (ps.tp/.sl null). -->
+          <button class="sim-leg-drop tp" data-leg="tp" type="button"
+                  data-i18n-title="sim.tooltipDragTp" title="拖曳到價格以新增停利">TP</button>
+          <button class="sim-leg-drop sl" data-leg="sl" type="button"
+                  data-i18n-title="sim.tooltipDragSl" title="拖曳到價格以新增停損">SL</button>
+        </div>
+        <div class="entry-body">
+          <button class="seg seg-qty" type="button" tabindex="-1">
+            <span class="chev">«</span><span class="qty">1</span>
+          </button>
+          <!-- R/R segment (tp-sl-drop-spec §6). Only shown when BOTH TP
+               and SL legs have prices; otherwise the ratio is undefined. -->
+          <div class="seg seg-rr" hidden><span class="rr">R/R —</span></div>
+          <div class="seg seg-pl"><span class="pl">0.00 USD</span></div>
+          <button class="seg seg-x" type="button" tabindex="-1" data-i18n-title="sim.tooltipClosePos" title="關閉部位">×</button>
+        </div>
+      </div>
+      <div class="sim-ticket sl" data-leg="sl" hidden>
+        <span class="sim-ticket-warn" hidden data-i18n-title="sim.tooltipWarnSl" title="停損價格已穿過當前K棒">!</span>
+        <button class="seg seg-qty" type="button" tabindex="-1">
+          <span class="chev">«</span><span class="qty">1</span>
+        </button>
+        <div class="seg seg-pl"><span class="pl">-0.00 USD</span></div>
+        <button class="seg seg-x" type="button" tabindex="-1" data-i18n-title="sim.tooltipCancelSl" title="取消停損">×</button>
+      </div>
+    </div>
+
+    <!-- ========== Leg-drop ghost (tp-sl-drop-spec §3) ==========
+         Single shared mini-ticket that follows the cursor while the user
+         is dragging a +TP / +SL drop source onto the chart. position:
+         fixed so it tracks page-level mouse coords regardless of any
+         scroll containers; pointer-events: none so the chart still
+         reports hovered prices underneath. The leg-name + accent color
+         are flipped via the data-leg attribute on each drag start. -->
+    <div id="sim-leg-ghost" class="sim-leg-ghost" data-leg="tp" hidden>
+      <span class="chev">«</span>
+      <span class="leg-name">TP</span>
+      <span class="amount">+ 0.00 USD</span>
+    </div>
+  </div>
+
+  <!-- ========== Trading panel (hidden by default) — sim_panel.js ==========
+       Sits as a flex sibling of #chart-area so opening it shrinks the chart
+       instead of overlaying the price axis (TradingView-style dock). -->
+  <aside id="sim-panel" class="hidden">
+    <header>
+      <span class="title" data-i18n="panel.sim.title">下單</span>
+      <span class="sim-symbol" id="sim-panel-symbol">—</span>
+      <button class="close-btn" id="sim-panel-close" title="關閉 (Esc)">✕</button>
+    </header>
+
+    <!-- Mode tabs: 下單 (orders) / DOM (depth — stub for v1) -->
+    <nav class="sim-mode-tabs">
+      <button class="sim-mode-tab active" data-sim-mode="order" data-i18n="panel.sim.modeOrder">下單</button>
+      <button class="sim-mode-tab disabled" data-sim-mode="dom" data-i18n-title="panel.sim.modeDomTooltip" title="尚未實作" data-i18n="panel.sim.modeDom">DOM</button>
+    </nav>
+
+    <!-- ===== Entry mode: shown while no position is open ===== -->
+    <section class="sim-body" data-sim-view="entry">
+      <!-- Order type tabs: 市場 / 限價 / 停損 / 停損限價 -->
+      <nav class="sim-type-tabs">
+        <button class="sim-type-tab active" data-sim-type="market" data-i18n="sim.typeMarket">市場</button>
+        <button class="sim-type-tab" data-sim-type="limit" data-i18n="sim.typeLimit">限價</button>
+        <button class="sim-type-tab" data-sim-type="stop" data-i18n="sim.typeStop">停損</button>
+        <button class="sim-type-tab" data-sim-type="stop_limit" data-i18n="sim.typeStopLimit">停損限價</button>
+      </nav>
+
+      <div class="sim-form">
+        <div class="sim-row" data-sim-field="qty">
+          <label data-i18n="sim.fieldQty">單位</label>
+          <input type="number" id="sim-qty" min="0.01" step="1" value="1">
+        </div>
+        <div class="sim-row hidden" data-sim-field="price">
+          <!-- Label flips between 限價 / 觸發價格 / 限價 (for stop-limit)
+               by sim_panel.js — keep i18n key in sync via dynamic render
+               in commit 2. Default fallback is the limit-price form. -->
+          <label id="sim-price-label" data-i18n="sim.fieldLimitPrice">限價</label>
+          <input type="number" id="sim-price" step="0.25">
+        </div>
+        <div class="sim-row hidden" data-sim-field="stop">
+          <label data-i18n="sim.fieldTriggerPrice">觸發價格</label>
+          <input type="number" id="sim-stop" step="0.25">
+        </div>
+
+        <div class="sim-info">
+          <div class="sim-info-row"><span data-i18n="sim.fieldTickValue">Tick 值</span><span id="sim-info-tick">—</span></div>
+          <div class="sim-info-row"><span data-i18n="sim.fieldNotional">交易額</span><span id="sim-info-notional">—</span></div>
+        </div>
+
+        <div class="sim-bidask">
+          <div class="sim-bidask-cell sell">
+            <span class="sim-bidask-label" data-i18n="sim.fieldBid">賣出</span>
+            <span class="sim-bidask-price" id="sim-bid">—</span>
+          </div>
+          <div class="sim-bidask-cell buy">
+            <span class="sim-bidask-label" data-i18n="sim.fieldAsk">買入</span>
+            <span class="sim-bidask-price" id="sim-ask">—</span>
+          </div>
+        </div>
+
+        <div class="sim-cta-stack">
+          <!-- CTA text is set programmatically by sim_panel.js — sim.ctaSell / sim.ctaBuy
+               with {qty}/{symbol}/{type} interpolation. Static fallback shows the
+               default qty=1 / symbol=NQ / type=Market form. -->
+          <button class="sim-cta sell" id="sim-cta-sell">賣出 1 NQ! 市價</button>
+          <button class="sim-cta buy"  id="sim-cta-buy" >買入 1 NQ! 市價</button>
+        </div>
+
+        <div class="sim-warning hidden" id="sim-replay-warning" data-i18n="sim.warnReplayMode">
+          ⚠ 切換到重播模式才會 tick by tick 模擬；目前下單會立即用最新K棒成交。
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== Position mode: shown after entry fills =====
+         The TP/SL setup lives entirely on the chart side now (drag a
+         +TP / +SL drop source from the entry ticket — see
+         tp-sl-drop-spec). The side panel is purely position info:
+         header, stats, action buttons, pending-order list. -->
+    <section class="sim-body hidden" data-sim-view="position">
+      <!-- Header content set by sim_panel._renderPositionView via sim.posHeader
+           ({side} {qty} @ {entry}). -->
+      <div class="sim-position-header" id="sim-pos-header">看多 1 @ 26500.00</div>
+
+      <div class="sim-position-stats">
+        <div class="sim-info-row"><span data-i18n="sim.unrealizedPnl">未實現損益</span><span id="sim-pos-pnl">—</span></div>
+        <div class="sim-info-row"><span>MFE</span><span id="sim-pos-mfe">—</span></div>
+        <div class="sim-info-row"><span>MAE</span><span id="sim-pos-mae">—</span></div>
+        <div class="sim-info-row"><span data-i18n="sim.openedAt">進場時間</span><span id="sim-pos-opened">—</span></div>
+      </div>
+
+      <!-- Proposal-phase 確認/捨棄 buttons live inside the chart-side
+           entry ticket now (tp-sl-drop-spec §6); side-panel side just
+           keeps the manual market-exit button. -->
+      <div class="sim-position-actions" id="sim-pos-committed-actions">
+        <button class="sim-cta neutral" id="sim-pos-close" data-i18n="sim.closeAtMarket">市價平倉</button>
+      </div>
+    </section>
+
+    <!-- Pending orders list (always visible if any) -->
+    <section class="sim-pending-list" id="sim-pending-list">
+      <!-- Populated dynamically. Each row: type / side / price / qty / [X cancel] -->
+    </section>
+  </aside>
+
+  <!-- ========== Branch panel (branching-replay-spec §5.3) ==========
+       Right-side panel showing the branch tree. Phase 1: read-only flat
+       list + bottom summary. Phase 2 adds 「+ 新增」 button (manual
+       fork). Phase 5 adds rename / delete / context menu / promotion
+       trigger. Phase 6 adds the contamination-history modal hook. -->
+  <aside id="branch-panel" class="hidden">
+    <header>
+      <span class="title" data-i18n="branch.title">分支列表</span>
+      <span class="branch-panel-count">(0)</span>
+      <span class="spacer"></span>
+      <button class="close-btn" id="branch-panel-close" data-i18n-title="common.close" title="關閉">✕</button>
+    </header>
+    <div class="branch-panel-toolbar">
+      <label class="branch-archived-toggle">
+        <input type="checkbox" id="branch-show-archived"> <span data-i18n="branch.showArchived">顯示已歸檔分支</span>
+      </label>
+    </div>
+    <div class="branch-list" role="list">
+      <!-- Populated by branch_panel.js — one .branch-row per Branch -->
+    </div>
+    <footer class="branch-summary">
+      <!-- Populated dynamically: real / exploration / hindsight / contamination -->
+    </footer>
+  </aside>
+</main>
+
+<!-- ========== Replay control bar (hidden by default) ========== -->
+<div id="replay-bar" class="hidden">
+  <button class="replay-btn" id="rep-pick" data-i18n-title="replay.pickBarTooltip" title="選擇K線">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <!-- K-bar on the left + arrow pointing at it -->
+      <line x1="5" y1="4" x2="5" y2="20"/>
+      <rect x="3" y="9" width="4" height="7" fill="currentColor" stroke="none"/>
+      <polyline points="13 16 10 12 13 8"/>
+      <line x1="20" y1="12" x2="10" y2="12"/>
+    </svg>
+    <span data-i18n="replay.pickBar">選擇K線</span>
+  </button>
+  <button class="replay-btn" id="rep-play" data-i18n-title="replay.playPauseTooltip" title="播放/暫停 (Space)">
+    <svg id="rep-play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+      <polygon points="5 3 19 12 5 21 5 3"/>
+    </svg>
+  </button>
+  <button class="replay-btn" id="rep-step-back" data-i18n-title="replay.stepBackTooltip" title="上一根 (, 逗號)">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+      <rect x="5" y="4" width="2" height="16"/>
+      <polygon points="19 4 9 12 19 20"/>
+    </svg>
+  </button>
+  <button class="replay-btn" id="rep-step" data-i18n-title="replay.stepForwardTooltip" title="下一根 (. 句號)">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+      <polygon points="5 4 15 12 5 20"/>
+      <rect x="17" y="4" width="2" height="16"/>
+    </svg>
+  </button>
+  <select id="rep-speed">
+    <option value="0.5">0.5x</option>
+    <option value="1">1x</option>
+    <option value="2">2x</option>
+    <option value="3" selected>3x</option>
+    <option value="5">5x</option>
+    <option value="10">10x</option>
+  </select>
+  <select id="rep-subtf" data-i18n-title="replay.subTfTooltip" title="子K線粒度">
+    <option value="1m" selected>1m</option>
+    <option value="3m">3m</option>
+    <option value="5m">5m</option>
+  </select>
+  <button class="replay-btn" id="rep-end" data-i18n-title="replay.jumpToEnd" title="跳到最後">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+      <polygon points="5 4 15 12 5 20"/>
+      <rect x="16" y="4" width="2" height="16"/>
+    </svg>
+  </button>
+  <span class="replay-status" id="rep-status"></span>
+  <button class="replay-btn close" id="rep-exit" data-i18n-title="replay.exit" title="關閉重播">✕</button>
+</div>
+
+<!-- (sim-panel moved into #main as a flex sibling of #chart-area so it
+     takes its own column instead of overlaying the price axis) -->
+
+<!-- ========== Object tree panel (hidden by default) ========== -->
+<aside id="obj-tree" class="hidden">
+  <header>
+    <span class="title" data-i18n="panel.objectTree.title">物件樹</span>
+    <button class="close-btn" id="obj-tree-close" data-i18n-title="common.close" title="關閉">✕</button>
+  </header>
+  <div class="obj-list" id="obj-tree-list"></div>
+  <footer>
+    <button id="obj-tree-clear" class="danger-btn" data-i18n="panel.objectTree.clearAll">清除所有繪圖</button>
+  </footer>
+</aside>
+
+<!-- ========== Timeframe input popup (TradingView-style) ========== -->
+<div id="tf-popup" class="hidden">
+  <div class="tf-popup-title"><span data-i18n="dlg.tfPopupTitle">變更週期</span> <span class="tf-info">ⓘ</span></div>
+  <div class="tf-popup-input" id="tf-popup-input"></div>
+  <div class="tf-popup-sub" id="tf-popup-sub"></div>
+</div>
+
+<!-- ========== Replay save/restore dialog (hidden by default) ========== -->
+<div id="replay-dialog" class="hidden">
+  <div class="rd-backdrop"></div>
+  <div class="rd-modal">
+    <header>
+      <!-- Title + body + button labels are rewritten by replay.js's
+           `showReplayDialog` (resume vs exit flows). Static fallbacks
+           are the exit-flow defaults. -->
+      <span class="title" id="rd-title">離開目前重播？</span>
+      <button class="close-btn" id="rd-close">✕</button>
+    </header>
+    <div class="rd-body" id="rd-body">您可以儲存此重播，以便稍後繼續觀看。</div>
+    <div class="rd-options hidden" id="rd-options">
+      <label><input type="checkbox" id="rd-save" checked> <span data-i18n="replay.dlgSaveSession">儲存此重播</span></label>
+    </div>
+    <div class="rd-actions">
+      <button class="rd-secondary" id="rd-btn-secondary">停留</button>
+      <button class="rd-primary" id="rd-btn-primary">離開</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Symbol search dialog (hidden by default) ========== -->
+<div id="symbol-search" class="hidden">
+  <div class="symbol-backdrop"></div>
+  <div class="symbol-modal">
+    <header>
+      <span class="title" data-i18n="dlg.symSearchTitle">商品搜尋</span>
+      <button class="icon-btn" id="sym-rescan" data-i18n-title="dlg.symRescanTooltip" title="重新掃描資料夾"
+              data-i18n-aria="dlg.symRescanTooltip" aria-label="重新掃描資料夾">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"/>
+          <polyline points="1 20 1 14 7 14"/>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+        </svg>
+      </button>
+      <button class="close-btn" id="sym-close">✕</button>
+    </header>
+    <div class="symbol-input-row">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+      </svg>
+      <input type="text" id="sym-input" autocomplete="off"
+             data-i18n-placeholder="dlg.symSearchPlaceholder" placeholder="輸入商品代號...">
+    </div>
+    <div class="symbol-list" id="sym-list"></div>
+  </div>
+</div>
+
+<!-- ========== Right-click context menu (hidden by default) ========== -->
+<div id="ctx-menu" class="hidden">
+  <div class="ctx-item" data-act="clone">
+    <span data-i18n="ctx.clone">克隆</span><span class="hint">Ctrl+D</span>
+  </div>
+  <div class="ctx-item" data-act="copy">
+    <span data-i18n="ctx.copy">複製</span><span class="hint">Ctrl+C</span>
+  </div>
+  <div class="ctx-item" data-act="cut">
+    <span data-i18n="ctx.cut">剪下</span><span class="hint">Ctrl+X</span>
+  </div>
+  <div class="ctx-item" data-act="paste" data-needs-clipboard="1">
+    <span data-i18n="ctx.paste">貼上</span><span class="hint">Ctrl+V</span>
+  </div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-act="zorder-top" data-i18n="ctx.zorderTop">置於頂層</div>
+  <div class="ctx-item" data-act="zorder-bottom" data-i18n="ctx.zorderBottom">置於底層</div>
+  <div class="ctx-sep"></div>
+  <!-- lock/hide labels are flipped by drawing.js refreshContextMenuLabels.
+       Default static labels are the lock/hide forms; the JS overrides
+       to "解鎖"/"顯示" when state is already locked/hidden. -->
+  <div class="ctx-item" data-act="lock"><span class="lock-label" data-i18n="ctx.lock">鎖定</span></div>
+  <div class="ctx-item" data-act="hide"><span class="hide-label" data-i18n="ctx.hide">隱藏</span></div>
+  <div class="ctx-item danger" data-act="remove">
+    <span data-i18n="ctx.remove">移除</span><span class="hint">Del</span>
+  </div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item path-only" data-act="continue-path" data-i18n="ctx.continuePath">繼續連接</div>
+  <div class="ctx-item" data-act="settings" data-i18n="ctx.settings">設定…</div>
+</div>
+
+<!-- ========== Chart-area context menu (right-click on empty chart) ========== -->
+<div id="chart-ctx-menu" class="hidden">
+  <div class="ctx-item" data-act="copy">
+    <span data-i18n="ctx.copy">複製</span><span class="hint">Ctrl+C</span>
+  </div>
+  <div class="ctx-item" data-act="paste">
+    <span data-i18n="ctx.paste">貼上</span><span class="hint">Ctrl+V</span>
+  </div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-act="object-tree" data-i18n="ctx.objectTree">物件樹</div>
+  <div class="ctx-item has-submenu" data-act="templates">
+    <span data-i18n="ctx.tplMenu">圖表模板</span><span class="ctx-arrow">›</span>
+    <div class="ctx-submenu" id="chart-tpl-submenu">
+      <div class="ctx-item" data-act="tpl-save-as" data-i18n="ctx.tplSaveAs">另存為…</div>
+      <div class="ctx-sep ctx-tpl-sep" hidden></div>
+      <!-- Saved chart templates injected dynamically as .ctx-item.tpl-row -->
+    </div>
+  </div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" data-act="settings" data-i18n="ctx.settings">設定…</div>
+</div>
+
+<!-- ========== Chart settings modal (right-click → 設定…) ==========
+     Two sections only — 商品 (K-bar colors + bg + templates, commit 2)
+     and 語言設置 (language dropdown, commit 3). The container itself
+     is the click-blocker (no separate backdrop) so dragging the card
+     header doesn't synthesize a click on a sibling element. -->
+<div id="chart-settings-modal" class="hidden">
+  <div class="modal-card">
+    <header>
+      <span class="title" data-i18n="panel.settings.title">設定</span>
+      <button class="close-btn" id="chart-settings-close" type="button">✕</button>
+    </header>
+    <div class="modal-body">
+      <aside class="modal-nav">
+        <div class="modal-nav-item active" data-section="symbol" data-i18n="panel.settings.navSymbol">商品</div>
+        <div class="modal-nav-item"        data-section="symspec" data-i18n="panel.symspec.navTitle">商品規格</div>
+        <div class="modal-nav-item"        data-section="lang" data-i18n="panel.settings.navLang">語言設置</div>
+        <div class="modal-nav-item"        data-section="shortcuts" data-i18n="panel.settings.navShortcuts">快捷查看</div>
+      </aside>
+      <section class="modal-section" data-section="symbol">
+        <div class="cs-group">
+          <div class="cs-group-title" data-i18n="panel.settings.kbarGroup">K 線</div>
+          <div class="cs-row">
+            <input type="checkbox" class="cs-toggle" id="cs-toggle-body" data-key="bodyVisible" checked>
+            <label for="cs-toggle-body" class="cs-label cs-label-toggle" data-i18n="panel.settings.body">主體</label>
+            <button class="color-swatch cs-swatch" type="button" data-key="upBody"   data-i18n-title="panel.settings.upColor"   title="上漲色"></button>
+            <button class="color-swatch cs-swatch" type="button" data-key="downBody" data-i18n-title="panel.settings.downColor" title="下跌色"></button>
+          </div>
+          <div class="cs-row">
+            <span class="cs-label" data-i18n="panel.settings.border">邊框</span>
+            <button class="color-swatch cs-swatch" type="button" data-key="upBorder"   data-i18n-title="panel.settings.upColor"   title="上漲色"></button>
+            <button class="color-swatch cs-swatch" type="button" data-key="downBorder" data-i18n-title="panel.settings.downColor" title="下跌色"></button>
+          </div>
+          <div class="cs-row">
+            <span class="cs-label" data-i18n="panel.settings.wick">燭芯</span>
+            <button class="color-swatch cs-swatch" type="button" data-key="upWick"   data-i18n-title="panel.settings.upColor"   title="上漲色"></button>
+            <button class="color-swatch cs-swatch" type="button" data-key="downWick" data-i18n-title="panel.settings.downColor" title="下跌色"></button>
+          </div>
+        </div>
+        <div class="cs-group">
+          <div class="cs-group-title" data-i18n="panel.settings.chartGroup">主圖</div>
+          <div class="cs-row">
+            <span class="cs-label" data-i18n="panel.settings.chartBg">背景</span>
+            <button class="color-swatch cs-swatch" type="button" data-key="bg" data-i18n-title="panel.settings.chartBgTooltip" title="主圖背景色"></button>
+          </div>
+        </div>
+        <div class="cs-tpl-row">
+          <button class="cs-tpl-btn" id="cs-tpl-button" type="button"><span data-i18n="panel.settings.template">範本</span> <span class="caret">▾</span></button>
+          <div class="cs-tpl-popover" id="cs-tpl-popover" hidden>
+            <div class="cs-tpl-item" data-act="default" data-i18n="panel.settings.applyDefault">套用預設值</div>
+            <div class="cs-tpl-item" data-act="save-as" data-i18n="panel.settings.saveAs">另存為…</div>
+            <div class="cs-tpl-sep" id="cs-tpl-sep" hidden></div>
+            <!-- Saved templates injected as .cs-tpl-item.cs-tpl-saved with a ✕ child -->
+          </div>
+        </div>
+      </section>
+      <section class="modal-section hidden" data-section="symspec">
+        <!-- List view: all known symbols + their current spec status. -->
+        <div class="symspec-view symspec-list" data-symspec-view="list">
+          <p class="symspec-hint" data-i18n="panel.symspec.listHint">
+            點選商品 → 編輯跳動量、每點金額、計價貨幣等。
+          </p>
+          <div class="symspec-table-wrap">
+            <table class="symspec-table">
+              <thead>
+                <tr>
+                  <th data-i18n="panel.symspec.colSymbol">商品</th>
+                  <th data-i18n="panel.symspec.colName">名稱</th>
+                  <th data-i18n="panel.symspec.colTick">跳動量</th>
+                  <th data-i18n="panel.symspec.colPointValue">每點金額</th>
+                  <th data-i18n="panel.symspec.colCurrency">貨幣</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="symspec-list-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <!-- Edit view: form for the selected symbol. SymbolSettings.show() flips
+             which view is hidden. -->
+        <div class="symspec-view symspec-edit hidden" data-symspec-view="edit">
+          <button type="button" class="symspec-back" id="symspec-back-btn"
+                  data-i18n="panel.symspec.btnBack">← 返回列表</button>
+          <h3 class="symspec-edit-title" id="symspec-edit-title">—</h3>
+          <p class="symspec-history-warn" data-i18n="panel.symspec.warnHistoryNote">
+            ⚠ 修改後僅影響「之後」的新交易。
+          </p>
+          <div class="symspec-form" id="symspec-form">
+            <div class="symspec-row">
+              <label data-i18n="panel.symspec.fieldDisplayName">顯示名稱</label>
+              <input type="text" class="symspec-input" data-field="displayName" maxlength="80">
+            </div>
+            <div class="symspec-row">
+              <label data-i18n="panel.symspec.fieldKind">類型</label>
+              <select class="symspec-input" data-field="kind">
+                <option value="future" data-i18n="panel.symspec.kindFuture">期貨</option>
+                <option value="spot"   data-i18n="panel.symspec.kindSpot">現貨</option>
+              </select>
+            </div>
+            <div class="symspec-row">
+              <label data-i18n="panel.symspec.fieldTickSize">最小跳動量</label>
+              <input type="number" class="symspec-input" data-field="tickSize" step="any" min="0">
+            </div>
+            <div class="symspec-row">
+              <label data-i18n="panel.symspec.fieldPointValue">每大點金額</label>
+              <input type="number" class="symspec-input" data-field="pointValue" step="any" min="0">
+            </div>
+            <div class="symspec-row">
+              <label data-i18n="panel.symspec.fieldLotSize">手數大小</label>
+              <input type="number" class="symspec-input" data-field="lotSize" step="any" min="0">
+            </div>
+            <div class="symspec-row">
+              <label data-i18n="panel.symspec.fieldQtyStep">最小手數</label>
+              <input type="number" class="symspec-input" data-field="qtyStep" step="any" min="0">
+            </div>
+            <div class="symspec-row">
+              <label data-i18n="panel.symspec.fieldSpread">預設買賣價差</label>
+              <input type="number" class="symspec-input" data-field="spread" step="any" min="0">
+            </div>
+            <div class="symspec-row">
+              <label data-i18n="panel.symspec.fieldSlippage">停損滑價(tick)</label>
+              <input type="number" class="symspec-input" data-field="slippageTicks" step="1" min="0">
+            </div>
+            <div class="symspec-row">
+              <label data-i18n="panel.symspec.fieldCommission">單邊手續費</label>
+              <input type="number" class="symspec-input" data-field="commissionPerSide" step="any" min="0">
+            </div>
+            <div class="symspec-row">
+              <label data-i18n="panel.symspec.fieldCurrency">計價貨幣</label>
+              <select class="symspec-input" data-field="currency">
+                <!-- Populated by symbol_settings.js from SymbolSpecs.ALLOWED_CURRENCIES -->
+              </select>
+            </div>
+            <p class="symspec-hint symspec-hint-currency" data-i18n="panel.symspec.hintCurrency">
+              此貨幣只影響 P&L 顯示格式。
+            </p>
+          </div>
+          <div class="symspec-edit-actions">
+            <button type="button" class="btn-cancel" id="symspec-reset-btn"
+                    data-i18n="panel.symspec.btnReset">還原為預設</button>
+            <button type="button" class="btn-confirm" id="symspec-save-btn"
+                    data-i18n="panel.symspec.btnSave">儲存</button>
+          </div>
+        </div>
+      </section>
+      <section class="modal-section hidden" data-section="lang">
+        <div class="cs-group">
+          <div class="cs-group-title" data-i18n="panel.settings.langGroup">介面語言</div>
+          <div class="cs-row">
+            <span class="cs-label" data-i18n="panel.settings.langLabel">語言</span>
+            <!-- Spec §4.1 step 3: en option flipped to enabled, suffix dropped. -->
+            <select class="cs-lang-select" id="cs-lang-select">
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+          <div class="cs-lang-hint" data-i18n="panel.settings.langHint">
+            切換語言會立即生效。
+          </div>
+        </div>
+      </section>
+    </div>
+    <footer class="modal-footer">
+      <button class="btn-cancel"  id="chart-settings-cancel"  type="button" data-i18n="common.cancel">取消</button>
+      <button class="btn-confirm" id="chart-settings-confirm" type="button" data-i18n="common.confirm">確認</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ========== Shortcuts reference window ==========
+     Standalone draggable window opened by 設定 → 快捷查看 nav item.
+     Detached from the settings modal so it can be wider (two-column
+     layout) and stay open while the user works. drawing.js renders
+     the body once via _renderShortcutsBody(); the window is shown /
+     hidden by openShortcutsWindow() / closeShortcutsWindow(). -->
+<div id="shortcuts-window" class="hidden">
+  <div class="modal-card sw-card">
+    <header>
+      <span class="title" data-i18n="panel.settings.navShortcuts">快捷查看</span>
+      <button class="close-btn" id="shortcuts-window-close" type="button">✕</button>
+    </header>
+    <div class="sw-body" id="shortcuts-window-body">
+      <!-- Populated by drawing.js _renderShortcutsBody() -->
+    </div>
+  </div>
+</div>
+
+<!-- ========== Drawing settings panel (hidden by default) ========== -->
+<div id="settings-panel" class="hidden">
+  <header>
+    <!-- Title set programmatically by drawing.js showSettings (overlay
+         display name via getOverlayDisplayName). Static fallback uses
+         the trendline label since that's the most common case. -->
+    <span class="title" id="sp-title">趨勢線</span>
+    <button class="close-btn" id="sp-close">✕</button>
+  </header>
+  <nav class="tabs">
+    <button class="tab active" data-tab="style" data-i18n="panel.drawing.tabStyle">樣式</button>
+    <button class="tab hidden" data-tab="text" data-i18n="panel.drawing.tabText">文字</button>
+    <button class="tab" data-tab="visible" data-i18n="panel.drawing.tabVisible">可見性</button>
+  </nav>
+
+  <section class="tab-body" data-tab="style">
+    <div class="row" id="sp-row-color1">
+      <label id="sp-color1-label" data-i18n="panel.drawing.color">顏色</label>
+      <button class="color-swatch" data-target="1" title="點擊選取顏色"></button>
+    </div>
+    <div class="row hidden" id="sp-row-color2">
+      <label data-i18n="panel.drawing.background">背景</label>
+      <button class="color-swatch" data-target="2" title="點擊選取背景顏色"></button>
+    </div>
+    <div class="row hidden" id="sp-row-border-toggle">
+      <label><input type="checkbox" id="sp-border-enabled"> <span data-i18n="panel.drawing.borderToggle">框線</span></label>
+      <button class="color-swatch" data-target="3" title="點擊選取框線顏色"></button>
+    </div>
+    <div class="row">
+      <label data-i18n="panel.drawing.thickness">厚度</label>
+      <div class="thickness-group">
+        <button class="th-btn active" data-size="1"><div class="th-line" style="height:1px"></div></button>
+        <button class="th-btn" data-size="2"><div class="th-line" style="height:2px"></div></button>
+        <button class="th-btn" data-size="3"><div class="th-line" style="height:3px"></div></button>
+        <button class="th-btn" data-size="4"><div class="th-line" style="height:4px"></div></button>
+      </div>
+    </div>
+    <div class="row" id="sp-row-linestyle">
+      <label data-i18n="panel.drawing.lineStyle">線條樣式</label>
+      <div class="line-style-group">
+        <button class="ls-btn active" data-style="solid"><span class="ls-preview solid"></span></button>
+        <button class="ls-btn" data-style="dashed"><span class="ls-preview dashed"></span></button>
+        <button class="ls-btn" data-style="dotted"><span class="ls-preview dotted"></span></button>
+      </div>
+    </div>
+
+  </section>
+
+  <section class="tab-body hidden" data-tab="text">
+    <div class="row sp-text-controls">
+      <button class="color-swatch" data-target="text" data-i18n-title="panel.drawing.textColor" title="文字顏色"></button>
+      <select id="sp-text-size" class="sp-select">
+        <option>8</option><option>10</option><option>11</option><option>12</option>
+        <option>14</option><option>16</option><option>18</option><option selected>20</option>
+        <option>22</option><option>24</option><option>28</option><option>32</option><option>40</option>
+      </select>
+      <button class="sp-toggle-btn" id="sp-text-bold" data-i18n-title="panel.drawing.bold" title="粗體"><b>B</b></button>
+      <button class="sp-toggle-btn" id="sp-text-italic" data-i18n-title="panel.drawing.italic" title="斜體"><i>I</i></button>
+    </div>
+    <div class="row">
+      <textarea id="sp-text-content" class="sp-textarea" rows="3"
+                data-i18n-placeholder="panel.drawing.textPlaceholder" placeholder="輸入文字…"></textarea>
+    </div>
+    <div class="row">
+      <label data-i18n="panel.drawing.textAlign">文字對齊</label>
+      <!-- These option labels need their data-i18n key applied to the
+           individual <option>. KLineChart's i18n engine treats <option>
+           as a child node of <select> so the same data-i18n attribute
+           pattern works there too — applyDOM walks all elements. -->
+      <select id="sp-text-vpos" class="sp-select">
+        <option value="top" data-i18n="panel.drawing.alignTop">頂部</option>
+        <option value="inside" selected data-i18n="panel.drawing.alignInside">內部</option>
+        <option value="bottom" data-i18n="panel.drawing.alignBottom">底部</option>
+      </select>
+      <select id="sp-text-halign" class="sp-select">
+        <option value="left" data-i18n="panel.drawing.alignLeft">左</option>
+        <option value="center" selected data-i18n="panel.drawing.alignCenter">中心</option>
+        <option value="right" data-i18n="panel.drawing.alignRight">右</option>
+      </select>
+    </div>
+  </section>
+
+  <section class="tab-body hidden" data-tab="visible">
+    <div class="row">
+      <label><input type="checkbox" id="sp-visible" checked> <span data-i18n="panel.drawing.show">顯示繪圖</span></label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="sp-locked"> <span data-i18n="panel.drawing.locked">鎖定（無法拖移）</span></label>
+    </div>
+  </section>
+
+  <footer>
+    <button id="sp-template-btn" class="tpl-btn">
+      <span data-i18n="panel.settings.template">範本</span>
+      <span class="chevron">▾</span>
+    </button>
+    <div class="sp-actions">
+      <button id="sp-cancel" data-i18n="common.cancel">取消</button>
+      <button id="sp-confirm" class="primary" data-i18n="common.confirm">確認</button>
+    </div>
+  </footer>
+</div>
+
+<!-- Template list popover -->
+<div id="sp-template-pop" class="hidden">
+  <div class="tpl-item tpl-action" data-act="save-as" data-i18n="panel.settings.saveAs">另存為…</div>
+  <div class="tpl-item tpl-action" data-act="apply-defaults" data-i18n="panel.settings.applyDefault">套用預設值</div>
+  <div class="tpl-sep"></div>
+  <div class="tpl-list" id="sp-template-list">
+    <!-- dynamically populated -->
+  </div>
+</div>
+
+<!-- Save-as modal -->
+<div id="tpl-save-modal" class="hidden">
+  <div class="tpl-modal-backdrop"></div>
+  <div class="tpl-modal-content">
+    <header>
+      <span class="title" data-i18n="panel.drawing.tplSaveTitle">儲存繪圖模板</span>
+      <button class="close-btn" id="tpl-save-close">✕</button>
+    </header>
+    <label class="tpl-label" data-i18n="panel.drawing.tplNameLabel">新模板名稱</label>
+    <div class="tpl-name-row">
+      <input type="text" id="tpl-name-input" autocomplete="off" placeholder="">
+      <button class="tpl-name-chevron" id="tpl-name-dropdown-btn" data-i18n-title="panel.drawing.tplExisting" title="已存在的名稱">▾</button>
+    </div>
+    <div class="tpl-name-existing hidden" id="tpl-name-existing"></div>
+    <div class="tpl-modal-actions">
+      <button id="tpl-save-cancel" data-i18n="common.cancel">取消</button>
+      <button id="tpl-save-confirm" class="primary" disabled data-i18n="common.save">儲存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Color popover (sibling of panel — panel has transform → can't host fixed children) -->
+<div class="color-popover hidden" id="sp-color-pop">
+  <div class="color-grid" id="sp-color-grid"></div>
+  <div class="color-custom-row">
+    <label data-i18n="panel.drawing.custom">自訂</label>
+    <input type="color" id="sp-color-custom" value="#2962ff">
+  </div>
+  <div class="row" style="margin-top:10px">
+    <label data-i18n="panel.drawing.opacity">不透明度</label>
+    <input type="range" min="0" max="100" value="100" id="sp-opacity" class="opacity-slider">
+    <span id="sp-opacity-val">100%</span>
+  </div>
+</div>
+
+<!-- Centered loading modal: shown during rescan / other blocking ops -->
+<div id="loading-modal" class="hidden" aria-hidden="true" role="dialog">
+  <div class="loading-card">
+    <div class="loader-wave" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span><span></span>
+    </div>
+    <!-- Set programmatically by Loading.show; static fallback is the
+         generic "Loading…" / "載入中…" string. -->
+    <div class="loading-text" id="loading-text" data-i18n="common.loading">載入中…</div>
+  </div>
+</div>
+
+<!-- Top-of-screen toast for brief status messages -->
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+<!-- First-run onboarding: shown when market_data/ is empty.
+     Spec i18n §3.11 + §4.1 step 5 — single language per node now,
+     switched at runtime via data-i18n keys. The previous dual-language
+     shadow elements (.onboarding-en) are gone. CSV format example
+     stays as inline <pre> since it's literal column names that are
+     identical in both locales. -->
+<div id="onboarding-overlay" class="hidden" aria-hidden="true">
+  <div class="onboarding-card">
+    <!-- Top-right language picker so a Chinese-speaking user landing
+         here on a fresh install (which boots in English by default)
+         can switch without opening Settings — this overlay covers the
+         whole UI so the toolbar's gear icon isn't reachable. Shares
+         the cs-lang-select class with the one inside Settings; setLang
+         iterates all selects with that class to keep them in sync. -->
+    <div class="onboarding-lang">
+      <select class="cs-lang-select" id="ob-lang-select" aria-label="Language">
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+      </select>
+    </div>
+    <div class="onboarding-icon">📊</div>
+    <h2 data-i18n="onboarding.title">目前沒有可用的行情資料</h2>
+    <p class="onboarding-sub" data-i18n="onboarding.body">
+      請把商品資料檔(.txt 或 .csv)放到以下資料夾:
+    </p>
+    <div class="onboarding-path">
+      <code id="onboarding-path-text">—</code>
+      <button type="button" id="onboarding-copy"
+              data-i18n-title="onboarding.copyTooltip" title="複製路徑"
+              data-i18n="onboarding.copy">複製</button>
+    </div>
+    <p class="onboarding-hint" data-i18n="onboarding.fileNameNote">
+      檔名 = 商品代號 — 例如 NQ1.txt → NQ1
+    </p>
+
+    <details class="onboarding-format" open>
+      <summary data-i18n="onboarding.formatSummary">需要的欄位格式</summary>
+      <pre class="onboarding-csv"><code>Date,Time,Open,High,Low,Close,TotalVolume
+2024/09/03,09:30:00,15523.25,15530.00,15521.50,15528.75,1842
+2024/09/03,09:31:00,15528.75,15532.25,15526.00,15530.50,1207</code></pre>
+      <ul class="onboarding-format-notes">
+        <li>Date:&nbsp;<code>YYYY/MM/DD</code></li>
+        <li>Time:&nbsp;<code>HH:MM:SS</code> (24h)</li>
+        <li><span data-i18n="onboarding.timezone">時區</span>:&nbsp;US Eastern (ET)</li>
+        <li><span data-i18n="onboarding.granularity">粒度</span>:&nbsp;1-minute</li>
+      </ul>
+    </details>
+
+    <div class="onboarding-actions">
+      <button type="button" id="onboarding-open" class="btn-primary"
+              data-i18n="onboarding.btnOpen">📁 開啟資料夾</button>
+      <button type="button" id="onboarding-reload"
+              data-i18n="onboarding.btnReload">🔄 重新載入</button>
+    </div>
+    <div id="onboarding-status" class="onboarding-status"></div>
+  </div>
+</div>
+
+<!-- Per-overlay position settings (right-click → 設定 on a long/short overlay) -->
+<div id="position-overlay-settings" class="settings-popover hidden" role="dialog" aria-hidden="true">
+  <header>
+    <!-- Title set programmatically by drawing.js — long_position →
+         "多頭部位"/"Long Position", short_position → 空頭部位/"Short Position".
+         Static fallback covers the generic case before render. -->
+    <span class="title" id="pos-ov-title" data-i18n="panel.position.title">部位設定</span>
+    <button class="close-btn" id="pos-ov-close">✕</button>
+  </header>
+  <nav class="tabs">
+    <button class="tab active" data-pos-tab="input" data-i18n="panel.position.tabInput">輸入</button>
+    <button class="tab" data-pos-tab="style" data-i18n="panel.position.tabStyle">樣式</button>
+    <button class="tab" data-pos-tab="visible" data-i18n="panel.position.tabVisible">可見性</button>
+  </nav>
+  <section class="pos-tab-body" data-pos-tab="input">
+    <div class="row">
+      <label data-i18n="panel.position.accountSize">帳戶大小</label>
+      <input type="number" id="pos-account-size" min="0" step="100">
+      <select id="pos-account-mode" class="pos-select-narrow">
+        <option value="default" data-i18n="panel.position.accountDefault">系統預設</option>
+      </select>
+    </div>
+    <div class="row">
+      <label data-i18n="panel.position.lotSize">手數大小</label>
+      <input type="number" id="pos-lot-size" min="0" step="0.01">
+    </div>
+    <div class="row">
+      <label data-i18n="panel.position.risk">風險</label>
+      <input type="number" id="pos-risk-percent" min="0" max="100" step="0.01">
+      <select class="pos-select-narrow"><option value="pct">%</option></select>
+    </div>
+    <div class="row">
+      <label data-i18n="panel.position.entryPrice">進場價</label>
+      <input type="number" id="pos-entry-price" step="0.01">
+    </div>
+    <div class="row">
+      <label data-i18n="panel.position.leverage">槓桿</label>
+      <input type="number" id="pos-leverage" min="0" step="1">
+    </div>
+    <div class="pos-section-label" data-i18n="panel.position.profitLevel">利潤水平</div>
+    <div class="row">
+      <label>Ticks</label>
+      <input type="number" id="pos-target-ticks" step="1">
+    </div>
+    <div class="row">
+      <label data-i18n="panel.position.price">價格</label>
+      <input type="number" id="pos-target-price" step="0.01">
+    </div>
+    <div class="pos-section-label" data-i18n="panel.position.stopLevel">停損水平</div>
+    <div class="row">
+      <label>Ticks</label>
+      <input type="number" id="pos-stop-ticks" step="1">
+    </div>
+    <div class="row">
+      <label data-i18n="panel.position.price">價格</label>
+      <input type="number" id="pos-stop-price" step="0.01">
+    </div>
+    <div class="row">
+      <label data-i18n="panel.position.qtyPrecision">QTY精度</label>
+      <!-- N-decimals options are formatted via panel.position.precNDecimals
+           by drawing.js at render time (template "{n}小數" / "{n} decimals").
+           Static text shown until the renderer flips them. -->
+      <select id="pos-qty-precision">
+        <option value="default" data-i18n="panel.position.precDefault">預設</option>
+        <option value="integer" data-i18n="panel.position.precInteger">整數</option>
+        <option value="1">1小數</option>
+        <option value="2">2小數</option>
+        <option value="3">3小數</option>
+        <option value="4">4小數</option>
+        <option value="5">5小數</option>
+        <option value="6">6小數</option>
+        <option value="7">7小數</option>
+        <option value="8">8小數</option>
+        <option value="9">9小數</option>
+        <option value="10">10小數</option>
+      </select>
+    </div>
+  </section>
+  <section class="pos-tab-body hidden" data-pos-tab="style">
+    <div class="row">
+      <label data-i18n="panel.position.line">線條</label>
+      <button class="color-swatch" id="pos-style-line-color" data-pos-style="line"
+              title="點擊選取線條顏色"></button>
+    </div>
+    <div class="row">
+      <label data-i18n="panel.position.stopColor">停損顏色</label>
+      <button class="color-swatch" id="pos-style-stop-color" data-pos-style="stop"
+              title="點擊選取停損顏色"></button>
+    </div>
+    <div class="row">
+      <label data-i18n="panel.position.targetColor">目標顏色</label>
+      <button class="color-swatch" id="pos-style-target-color" data-pos-style="target"
+              title="點擊選取目標顏色"></button>
+    </div>
+    <div class="row">
+      <label data-i18n="panel.position.textSize">文字大小</label>
+      <select id="pos-style-font-size" class="pos-select-narrow">
+        <option>10</option><option>11</option><option selected>12</option>
+        <option>13</option><option>14</option><option>16</option><option>18</option>
+      </select>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="pos-style-show-price-label" checked> <span data-i18n="panel.position.priceLabel">價格標籤</span></label>
+    </div>
+  </section>
+  <section class="pos-tab-body hidden" data-pos-tab="visible">
+    <div class="row"><label><input type="checkbox" id="pos-visible-cb" checked> <span data-i18n="panel.drawing.show">顯示繪圖</span></label></div>
+    <div class="row"><label><input type="checkbox" id="pos-locked-cb"> <span data-i18n="panel.drawing.locked">鎖定（無法拖移）</span></label></div>
+  </section>
+  <div class="ps-actions">
+    <button type="button" id="pos-cancel" data-i18n="common.cancel">取消</button>
+    <button type="button" id="pos-confirm" class="btn-primary" data-i18n="common.confirm">確認</button>
+  </div>
+</div>
+
+<!-- Per-overlay fibonacci settings (right-click → 設定 on a fibo_retrace
+     or fibo_extension overlay). 3 tabs: 樣式 / 坐標 / 可見性. Schema is
+     too different from the standard drawing-settings panel (24 fibo
+     levels, alpha slider, reverse, single-color override, etc.) to
+     share controls — drives its own popover via window.FiboSettings.
+     Levels grid is populated dynamically at open() time. -->
+<div id="fibo-overlay-settings" class="settings-popover hidden" role="dialog" aria-hidden="true">
+  <header>
+    <!-- Title set programmatically by drawing.js — 斐波那契回撤 for retrace,
+         斐波那契趨勢擴展 for extension. Both translate via i18n. -->
+    <span class="title" id="fibo-ov-title" data-i18n="panel.fibo.titleRetrace">斐波那契回撤</span>
+    <button class="close-btn" id="fibo-ov-close">✕</button>
+  </header>
+  <nav class="tabs">
+    <button class="tab active" data-fibo-tab="style"   data-i18n="panel.fibo.tabStyle">樣式</button>
+    <button class="tab"        data-fibo-tab="coords"  data-i18n="panel.fibo.tabCoords">坐標</button>
+    <button class="tab"        data-fibo-tab="visible" data-i18n="panel.fibo.tabVisible">可見性</button>
+  </nav>
+
+  <!-- ===== 樣式 tab ===== -->
+  <section class="fibo-tab-body" data-fibo-tab="style">
+    <!-- Trend connector line (only meaningful for extension; row hidden
+         for retracement via JS) -->
+    <div class="row fibo-row-trend">
+      <label><input type="checkbox" id="fibo-trendline-on"> <span data-i18n="panel.fibo.trendLine">趨勢線</span></label>
+      <button class="color-swatch fibo-swatch" id="fibo-trendline-color"
+              data-i18n-title="panel.fibo.trendLineColor" title="趨勢線顏色"></button>
+      <select id="fibo-trendline-style" class="pos-select-narrow">
+        <option value="solid"  data-i18n="panel.fibo.lineSolid">實線</option>
+        <option value="dashed" data-i18n="panel.fibo.lineDashed">虛線</option>
+      </select>
+    </div>
+    <div class="row">
+      <label data-i18n="panel.fibo.hLine">水平線</label>
+      <select id="fibo-hline-style" class="pos-select-narrow">
+        <option value="solid"  data-i18n="panel.fibo.lineSolid">實線</option>
+        <option value="dashed" data-i18n="panel.fibo.lineDashed">虛線</option>
+      </select>
+    </div>
+    <div class="row">
+      <label data-i18n="panel.fibo.extend">延伸</label>
+      <select id="fibo-extend" class="pos-select-narrow">
+        <option value="none"  data-i18n="panel.fibo.extendNone">不要延長</option>
+        <option value="left"  data-i18n="panel.fibo.extendLeft">向左</option>
+        <option value="right" data-i18n="panel.fibo.extendRight">向右</option>
+        <option value="both"  data-i18n="panel.fibo.extendBoth">雙向</option>
+      </select>
+    </div>
+
+    <!-- Level grid — 2-column. Populated by window.FiboSettings at open
+         time from overlay.extendData.levels. -->
+    <div class="fibo-levels-grid" id="fibo-levels-grid">
+      <!-- rows injected dynamically:
+        <div class="fibo-level-cell">
+          <input type="checkbox" class="fibo-level-on">
+          <input type="number" class="fibo-level-r" step="any">
+          <button class="color-swatch fibo-swatch fibo-level-color"></button>
+        </div>
+      -->
+    </div>
+
+    <div class="row fibo-row-single">
+      <label data-i18n="panel.fibo.singleColor">使用一個顏色</label>
+      <input type="checkbox" id="fibo-single-color-on">
+      <button class="color-swatch fibo-swatch" id="fibo-single-color"
+              data-i18n-title="panel.fibo.singleColorTooltip" title="統一顏色"></button>
+    </div>
+
+    <div class="row fibo-row-bg">
+      <label><input type="checkbox" id="fibo-bg-on"> <span data-i18n="panel.fibo.background">背景</span></label>
+      <input type="range" id="fibo-bg-alpha" min="0" max="1" step="0.02" class="fibo-alpha-slider">
+    </div>
+
+    <div class="row">
+      <label><input type="checkbox" id="fibo-reverse"> <span data-i18n="panel.fibo.reverse">反轉</span></label>
+    </div>
+  </section>
+
+  <!-- ===== 坐標 tab ===== -->
+  <section class="fibo-tab-body hidden" data-fibo-tab="coords">
+    <!-- Coord rows injected at open time — 2 rows for retrace, 3 for
+         extension. Each row: "#N (價格, K棒)" label + price input + bar input. -->
+    <div id="fibo-coords-rows"></div>
+  </section>
+
+  <!-- ===== 可見性 tab ===== -->
+  <section class="fibo-tab-body hidden" data-fibo-tab="visible">
+    <div class="row"><label><input type="checkbox" id="fibo-visible-cb" checked> <span data-i18n="panel.drawing.show">顯示繪圖</span></label></div>
+    <div class="row"><label><input type="checkbox" id="fibo-locked-cb"> <span data-i18n="panel.drawing.locked">鎖定（無法拖移）</span></label></div>
+  </section>
+
+  <div class="fibo-footer">
+    <div class="fibo-tpl-wrap">
+      <button class="fibo-tpl-btn" id="fibo-tpl-btn" type="button">
+        <span data-i18n="panel.fibo.template">範本</span> <span class="caret">▾</span>
+      </button>
+      <div class="fibo-tpl-popover" id="fibo-tpl-popover" hidden>
+        <div class="fibo-tpl-item" data-fibo-tpl="default" data-i18n="panel.fibo.tplApplyDefault">套用預設值</div>
+        <div class="fibo-tpl-item" data-fibo-tpl="save-as" data-i18n="panel.fibo.tplSaveAs">另存為…</div>
+        <div class="fibo-tpl-sep" id="fibo-tpl-sep" hidden></div>
+        <!-- saved templates injected as .fibo-tpl-item.fibo-tpl-saved -->
+      </div>
+    </div>
+    <div class="fibo-actions">
+      <button type="button" id="fibo-cancel"  data-i18n="common.cancel">取消</button>
+      <button type="button" id="fibo-confirm" class="btn-primary" data-i18n="common.confirm">確認</button>
+    </div>
+  </div>
+</div>
+
+<!-- Position-tool settings popover (gear icon in left toolbar) -->
+<div id="position-settings-popover" class="settings-popover hidden" role="dialog" aria-hidden="true">
+  <header>
+    <span class="title" data-i18n="panel.position.toolTitle">部位工具設定</span>
+    <button class="close-btn" id="ps-close">✕</button>
+  </header>
+  <div class="row">
+    <label data-i18n="panel.position.toolAccount">帳戶資金 (USD)</label>
+    <input type="number" id="ps-account-size" min="0" step="100">
+  </div>
+  <div class="row">
+    <label data-i18n="panel.position.toolDefaultRisk">預設風險 (%)</label>
+    <input type="number" id="ps-risk-pct" min="0" max="100" step="0.1">
+  </div>
+  <div class="row">
+    <label data-i18n="panel.position.toolRounding">數量取整</label>
+    <select id="ps-rounding">
+      <option value="floor" data-i18n="panel.position.toolRoundFloor">無條件捨去 (推薦)</option>
+      <option value="round" data-i18n="panel.position.toolRoundRound">四捨五入</option>
+    </select>
+  </div>
+  <div class="row">
+    <label data-i18n="panel.position.toolSymbol">商品代碼</label>
+    <select id="ps-symbol-override">
+      <option value="" data-i18n="panel.position.toolSymbolAuto">自動偵測</option>
+    </select>
+  </div>
+  <div class="ps-actions">
+    <button type="button" id="ps-reset" class="ps-link" data-i18n="panel.position.toolReset">重設預設值</button>
+    <button type="button" id="ps-save" class="btn-primary" data-i18n="common.save">儲存</button>
+  </div>
+  <div class="ps-status" id="ps-status"></div>
+</div>
+
+<script src="symbol_specs.js"></script>
+<script src="position_calc.js"></script>
+<script src="sim_engine.js"></script>
+<script src="drawing.js"></script>
+<script src="replay.js"></script>
+<script src="branch_engine.js"></script>
+<script src="branch_modals.js"></script>
+<script src="sim_overlays.js"></script>
+<script src="sim_panel.js"></script>
+<script src="branch_panel.js"></script>
+<script src="mini_chart.js"></script>
+<script src="sim_history.js"></script>
+<script src="symbol_settings.js"></script>
+<script src="app.js"></script>
+
+<!-- ========== Trade history drawer (sim_history.js) ==========
+     NOTE: this element is moved INTO #chart-area at runtime by
+     sim_history.init() so it sits as a vertical flex sibling of
+     #chart — opening the drawer shrinks the chart so the time axis
+     stays visible. We keep it declared here at body level so the
+     hidden initial state doesn't briefly take height before init
+     runs (the move is a single appendChild that doesn't unmount). -->
+<aside id="sim-history-panel" hidden>
+  <header class="sim-history-header">
+    <span class="sim-history-title" data-i18n="history.title">交易歷史</span>
+    <span class="sim-history-summary"></span>
+    <div class="sim-history-actions">
+      <button class="sim-history-clear" type="button"
+              data-i18n-title="history.clearTooltip" title="清除本分支所有交易">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/>
+          <path d="M10 11v6M14 11v6"/>
+        </svg>
+        <span data-i18n="history.clear">清除</span>
+      </button>
+      <button class="sim-history-export" type="button"
+              data-i18n-title="history.downloadTooltip" title="下載交易紀錄為 xlsx">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        <span data-i18n="history.download">下載</span>
+      </button>
+    </div>
+    <button class="sim-history-close" type="button" title="關閉 (T)">✕</button>
+  </header>
+  <div class="sim-history-body">
+    <table class="sim-history-table">
+      <thead>
+        <tr>
+          <th class="sim-history-num"        data-i18n="history.colTradeNum">交易 #</th>
+          <th class="sim-history-time"       data-i18n="history.colDateTime">日期和時間</th>
+          <th class="sim-history-ordertype"  data-i18n="history.colOrderType">訂單類型</th>
+          <th class="sim-history-price"      data-i18n="history.colPrice">價格</th>
+          <th class="sim-history-size"       data-i18n="history.colSize">大小</th>
+          <th class="sim-history-pl"         data-i18n="history.colNetPnl">淨損益</th>
+          <th class="sim-history-mfe"        data-i18n="history.colMfe">有利波動</th>
+          <th class="sim-history-mae"        data-i18n="history.colMae">不利波動</th>
+          <th class="sim-history-cum"        data-i18n="history.colCumPnl">累積損益</th>
+          <th class="sim-history-branch"     data-i18n="history.colBranch">分支</th>
+          <th class="sim-history-row-action" data-i18n-aria="history.actionsLabel" aria-label="操作"></th>
+        </tr>
+      </thead>
+      <tbody class="sim-history-tbody"></tbody>
+    </table>
+  </div>
+</aside>
+</body>
+</html>
