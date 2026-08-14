@@ -170,10 +170,20 @@
      *
      *   placeBracket({
      *     entry: { side, type, qty, price?, stopPrice? },
-     *     takeProfit: <price>,    // optional; opposite-side limit
-     *     stopLoss:   <price>,    // optional; opposite-side stop
+     *     takeProfit: <price>,    // optional single TP (opposite-side limit, full qty)
+     *     stopLoss:   <price>,    // optional single SL (opposite-side stop,  full qty)
+     *     // OR multi-segment (reduce-only, e.g. "close 1 lot at TP1, run the
+     *     // rest to TP2; SL covers whatever is still open"):
+     *     takeProfits: [{ price, qty }, …],   // each closes `qty` of the position
+     *     stopLosses:  [{ price, qty }, …],   // usually one leg sized to full qty
      *     setupTag:   '...',      // stamped on entry + position
      *   })
+     *
+     * Multi-segment legs are NOT OCO-paired — they form a REDUCE-ONLY group:
+     * each fill shrinks the position and the surviving legs clamp down to the
+     * still-open qty (see _reconcileExitLegs), so the runner keeps its SL / next
+     * TP alive at the right size instead of needing a manual re-draw. A legacy
+     * single TP + single SL keeps its exact 1:1 OCO behaviour.
      */
     function placeBracket(args) {
       if (!args || !args.entry) throw new Error('placeBracket needs args.entry');
@@ -183,34 +193,39 @@
         branchId: args.branchId || e.branchId,
       });
       const oppSide = e.side === 'buy' ? 'sell' : 'buy';
-      let tpId = null, slId = null;
-      if (Number.isFinite(args.takeProfit)) {
-        tpId = placeOrder({
-          side: oppSide, type: 'limit', qty: e.qty,
-          price: args.takeProfit,
-          bracketParentId: entryId,
-          setupTag: args.setupTag,
-          branchId: args.branchId || e.branchId,
-        });
+
+      // Normalise TP/SL into segment lists. Scalar → one full-qty segment.
+      const tpSegs = Array.isArray(args.takeProfits) ? args.takeProfits
+        : (Number.isFinite(args.takeProfit) ? [{ price: args.takeProfit, qty: e.qty }] : []);
+      const slSegs = Array.isArray(args.stopLosses) ? args.stopLosses
+        : (Number.isFinite(args.stopLoss) ? [{ price: args.stopLoss, qty: e.qty }] : []);
+      const usedArrays = Array.isArray(args.takeProfits) || Array.isArray(args.stopLosses);
+
+      const legOpts = (extra, seg) => ({
+        side: oppSide, qty: (seg.qty > 0 ? seg.qty : e.qty),
+        bracketParentId: entryId, setupTag: args.setupTag,
+        branchId: args.branchId || e.branchId, ...extra,
+      });
+      const tpIds = [], slIds = [];
+      for (const seg of tpSegs) {
+        if (!Number.isFinite(seg.price)) continue;
+        tpIds.push(placeOrder(legOpts({ type: 'limit', price: seg.price }, seg)));
       }
-      if (Number.isFinite(args.stopLoss)) {
-        slId = placeOrder({
-          side: oppSide, type: 'stop', qty: e.qty,
-          stopPrice: args.stopLoss,
-          bracketParentId: entryId,
-          setupTag: args.setupTag,
-          branchId: args.branchId || e.branchId,
-        });
+      for (const seg of slSegs) {
+        if (!Number.isFinite(seg.price)) continue;
+        slIds.push(placeOrder(legOpts({ type: 'stop', stopPrice: seg.price }, seg)));
       }
-      // OCO link the two children to each other so the first to fill
-      // cancels the other.
-      if (tpId != null && slId != null) {
-        const tp = state.orderHistory.find(o => o.id === tpId);
-        const sl = state.orderHistory.find(o => o.id === slId);
-        if (tp) tp.ocoSiblingId = slId;
-        if (sl) sl.ocoSiblingId = tpId;
+
+      // Legacy single-TP + single-SL keeps the exact 1:1 OCO pairing.
+      // Multi-segment groups intentionally skip OCO and rely on the reduce-only
+      // reconcile + dangling-cancel instead.
+      if (!usedArrays && tpIds.length === 1 && slIds.length === 1) {
+        const tp = state.orderHistory.find(o => o.id === tpIds[0]);
+        const sl = state.orderHistory.find(o => o.id === slIds[0]);
+        if (tp) tp.ocoSiblingId = slIds[0];
+        if (sl) sl.ocoSiblingId = tpIds[0];
       }
-      return { entryId, tpId, slId };
+      return { entryId, tpId: tpIds[0] || null, slId: slIds[0] || null, tpIds, slIds };
     }
 
     function cancelOrder(id) {
@@ -381,9 +396,32 @@
 
       _applyOrderToPosition(order, fillPrice, bar);
 
-      // Parent fill → arm its children. Sibling fill cancels the other.
+      // Parent fill → arm its children. Sibling fill cancels the other (legacy
+      // 1:1 OCO). Then, for a multi-segment reduce-only bracket, clamp the
+      // surviving exit legs down to whatever qty is still open.
       _activateBracketChildren(order.id);
       _cancelOcoSibling(order);
+      _reconcileExitLegs(order);
+    }
+
+    // After an EXIT leg (bracket child) fills and PARTIALLY reduces the
+    // position, clamp every remaining exit leg of the same bracket down to the
+    // still-open qty (reduce-only). This is what lets "close 1 lot at TP1, run
+    // the rest to TP2, SL covers the remainder" work with NO manual re-draw:
+    // when TP1 fills, the SL and TP2 keep guarding the runner at the right size.
+    // Full-close cancellation of the group is handled by
+    // _cancelDanglingChildrenFor (fired from _applyOrderToPosition at qty→0).
+    function _reconcileExitLegs(order) {
+      if (!order.bracketParentId) return;
+      const pos = state.positions[0] || null;
+      const openQty = pos ? pos.qty : 0;
+      if (openQty <= 1e-9) return;   // fully closed → dangling-cancel already ran
+      for (const o of state.pendingOrders) {
+        if (o.bracketParentId === order.bracketParentId
+            && o.status === 'pending' && o.qty > openQty) {
+          o.qty = openQty;
+        }
+      }
     }
 
     function _activateBracketChildren(parentId) {
@@ -441,6 +479,12 @@
       if (pos.qty <= 1e-9) {
         // Fully closed.
         pos.qty = 0;
+        // A closed position has NO open exposure, so its unrealised P&L is
+        // zero. _updateUnrealised only touches still-open positions, so
+        // without this the last open-bar's unrealised would linger and the
+        // trade-history netPL (realised + unrealised − commission) would
+        // double-count it. All P&L for a closed trade lives in realisedPnL.
+        pos.unrealisedPnL = 0;
         pos.closedAtBarTs = bar.timestamp;
         pos.closeReason = _deriveCloseReason(order);
         state.positions = state.positions.filter(p => p.id !== pos.id);

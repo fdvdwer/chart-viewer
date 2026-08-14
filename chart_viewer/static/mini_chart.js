@@ -60,6 +60,9 @@
         }
       });
 
+      // (Drawing on the mini is driven by the MAIN left toolbar now — setTool
+      // arms the tool on both charts, so no per-mini tool buttons are needed.)
+
       // Vertical resize handle — drag the thin strip at the top of the
       // panel to grow / shrink the mini chart. Inline `height` style
       // overrides the CSS default; clamped to [120, viewport*0.6].
@@ -140,6 +143,11 @@
       if (window.SimOverlays && window.SimOverlays.sync) {
         window.SimOverlays.sync();
       }
+      // Render this branch's mini-drawn overlays (trendlines etc.) onto the
+      // mini — once per show / branch switch, NOT per replay tick.
+      if (window.Drawing && window.Drawing.renderMiniBranchOverlays) {
+        window.Drawing.renderMiniBranchOverlays(this.chart, branch && branch.id);
+      }
       // If the trade-history drawer is currently open, opening mini
       // forces a re-layout into 1/3-each vertical thirds (main /
       // mini / drawer). Without this hook the mini would land at
@@ -158,6 +166,10 @@
       // briefly flash on the next show before sync runs.
       if (window.SimOverlays && window.SimOverlays.sync) {
         window.SimOverlays.sync();
+      }
+      // Clear this mini's branch-drawn overlays too.
+      if (window.Drawing && window.Drawing.renderMiniBranchOverlays) {
+        window.Drawing.renderMiniBranchOverlays(this.chart, null);
       }
       // Mirror of _show: if drawer is open and mini disappears, let
       // the drawer reset to its CSS default height (~38vh) so the

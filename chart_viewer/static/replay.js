@@ -525,7 +525,7 @@ function _doExitReplay() {
   _partialCache.binStart = null;   // clear partial cache
   _partialCache.mins = [];
   _removePickOverlays();            // defined below (pick-mode visuals)
-  const pickBtn = document.getElementById('rep-pick');
+  const pickBtn = document.getElementById('rep-pick-main');
   if (pickBtn) pickBtn.classList.remove('active');
   document.getElementById('replay-bar').classList.add('hidden');
   document.getElementById('btn-replay').classList.remove('active');
@@ -652,18 +652,43 @@ async function onTFChanged() {
     return;
   }
 
-  // Cursor out of the new TF's loaded range → ask user to re-pick
-  if (Replay.cursorTimestamp < Replay.baseBars[0].timestamp) {
-    Replay.cursorTimestamp = null;
-    Replay.displayBars = Replay.baseBars.slice();
-    Replay.subBars = [];
-    Replay.cursorIdx = 0;
-    Replay.chart.applyNewData(Replay.displayBars);
-    const status = document.getElementById('rep-status');
-    if (status) status.textContent = (window.I18n && window.I18n.t)
-      ? window.I18n.t('replay.statusOutOfTf')
-      : '游標超出新 TF 範圍，請重新「選擇K線」';
-    return;
+  // Cursor outside the freshly-loaded recent window — or so far back that the
+  // forward tail to the present is huge — → load a BOUNDED window AROUND the
+  // cursor instead of giving up. This is the common case when the cursor was
+  // picked on a coarse TF deep in the past (e.g. a 1D bar years back) and the
+  // user then switches to a fine TF (15m) whose lazy-load window only covers
+  // recent months: baseBars (the recent window) doesn't reach the cursor, so we
+  // must NOT drop the cursor and dump the whole recent series. Mirrors the
+  // deep-jump guard in setCursorAtTimestamp.
+  {
+    const bb = Replay.baseBars;
+    let needWindow = Replay.cursorTimestamp < bb[0].timestamp
+                  || Replay.cursorTimestamp > bb[bb.length - 1].timestamp;
+    if (!needWindow) {
+      let lo = 0, hi = bb.length - 1, at = 0;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (bb[mid].timestamp <= Replay.cursorTimestamp) { at = mid; lo = mid + 1; }
+        else hi = mid - 1;
+      }
+      if (bb.length - at > MAX_FORWARD_TAIL) needWindow = true;
+    }
+    if (needWindow) {
+      const idx = await _loadHistoryWindowAround(Replay.cursorTimestamp);
+      if (idx < 0) {
+        // Genuinely no data around the cursor → fall back to a re-pick prompt.
+        Replay.cursorTimestamp = null;
+        Replay.displayBars = Replay.baseBars.slice();
+        Replay.subBars = [];
+        Replay.cursorIdx = 0;
+        Replay.chart.applyNewData(Replay.displayBars);
+        const status = document.getElementById('rep-status');
+        if (status) status.textContent = (window.I18n && window.I18n.t)
+          ? window.I18n.t('replay.statusOutOfTf')
+          : '游標超出新 TF 範圍，請重新「選擇K線」';
+        return;
+      }
+    }
   }
 
   // Find bar CONTAINING the cursor: largest idx where baseBars[idx].ts ≤ cursor
@@ -923,6 +948,13 @@ function tick() {
   // display-TF bar, which is good enough to verify the panel works.
   if (window.SimController && window.SimController.onReplayTick) {
     window.SimController.onReplayTick();
+  }
+
+  // Event log: poll structural-event indicators for new entries. Same
+  // wiring pattern as SimController — fire-and-forget, panel decides
+  // whether to actually do work based on its open/closed state.
+  if (window.EventLog && window.EventLog.onReplayTick) {
+    window.EventLog.onReplayTick();
   }
 
   // View-follow logic: keep cursor visible when it's near the right edge,
@@ -1196,6 +1228,28 @@ async function setCursorAtTimestamp(ts, opts = {}) {
   const { snapView = true } = opts;
   const reqId = ++_cursorReqCounter;
 
+  // Load a bounded history window around ts when it's a DEEP-history jump:
+  //   (a) ts is outside the loaded bars (resume can't otherwise place it), or
+  //   (b) ts sits so far back that the forward tail to the present is huge —
+  //       which happens when currentBars was scrolled back to span the target.
+  //       Without this the placeholder zone stretches all the way to now (a
+  //       giant empty gap + a scary "remaining" count) and the chart lags.
+  // Normal step-back near the cursor keeps its already-bounded window untouched.
+  const bb = Replay.baseBars;
+  if (bb.length) {
+    let needWindow = ts < bb[0].timestamp || ts > bb[bb.length - 1].timestamp;
+    if (!needWindow) {
+      // binary-search the last bar <= ts, then measure the forward tail
+      let lo = 0, hi = bb.length - 1, at = 0;
+      while (lo <= hi) { const mid = (lo + hi) >> 1; if (bb[mid].timestamp <= ts) { at = mid; lo = mid + 1; } else hi = mid - 1; }
+      if (bb.length - at > MAX_FORWARD_TAIL) needWindow = true;
+    }
+    if (needWindow) {
+      await _loadHistoryWindowAround(ts);
+      if (reqId !== _cursorReqCounter) return;
+    }
+  }
+
   const dispStart = findDisplayBarStart(ts);
   if (dispStart == null) return;
   let idx = -1;
@@ -1263,6 +1317,22 @@ async function setCursorAtTimestamp(ts, opts = {}) {
   _refreshMini();
   _markReplayDirty();
 }
+
+// View-only scroll to the current replay cursor (the latest replayed bar) — the
+// "最新K棒" action. Does NOT move the cursor / touch the record, so it does not
+// count as replay progress (contrast setCursorAtTimestamp which rewinds + clears
+// tickHistory + bumps maxCursorTs). Returns you to "now" after an object-tree
+// navigation jump without wiping the replay record.
+Replay.scrollViewToCursor = function () {
+  if (!Replay.active || !Replay.chart || !Replay.chart.scrollToDataIndex) return;
+  const idx = Number.isFinite(Replay.cursorBarIdx) ? Replay.cursorBarIdx : 0;
+  try { Replay.chart.scrollToDataIndex(idx + 5, 0); } catch (e) {}
+};
+
+// Exposed exit — used by the object-tree jump when the target is a bar the replay
+// hasn't reached yet (its bars are placeholders): exit replay, then the caller
+// loads a bounded window around it (App.browseToTimestamp).
+Replay.exit = function () { return exitReplay(); };
 
 // Call before any forward-tick operation (play / .). If the cached subBars
 // don't start at the current cursor, re-fetch them. Rapid successive calls
@@ -1601,7 +1671,7 @@ function _cancelPick() {
   Replay.picking = false;
   _removePickOverlays();
   _restorePickCrosshair();
-  document.getElementById('rep-pick').classList.remove('active');
+  document.getElementById('rep-pick-main').classList.remove('active');
   const s = document.getElementById('rep-status');
   if (s) s.textContent = '';
 }
@@ -1612,7 +1682,7 @@ function enterPickMode() {
   if (Replay.picking) { _cancelPick(); return; }
   Replay.picking = true;
   document.body.classList.add('replay-picking');
-  document.getElementById('rep-pick').classList.add('active');
+  document.getElementById('rep-pick-main').classList.add('active');
   const status = document.getElementById('rep-status');
   if (status) status.textContent = (window.I18n && window.I18n.t)
     ? window.I18n.t('replay.statusPickClick')
@@ -1744,7 +1814,7 @@ function _commitPick(dataIndex) {
   Replay.picking = false;
   _removePickOverlays();
   _restorePickCrosshair();
-  document.getElementById('rep-pick').classList.remove('active');
+  document.getElementById('rep-pick-main').classList.remove('active');
 
   // Re-picking can only go backward. If a cursor already exists, cap
   // the click at the current cursor bar so user can't select a
@@ -1756,6 +1826,273 @@ function _commitPick(dataIndex) {
   setCursorAtBarIdx(safeIdx);
 }
 
+// Fetch a bar window from the server for the current symbol at a given TF.
+async function _fetchBarsWindow(tf, params) {
+  const p = new URLSearchParams({ tf, ...params });
+  const symbol = window.App && window.App.currentSymbol;
+  if (symbol) p.set('symbol', symbol);
+  const r = await fetch(`/api/ohlcv?${p}`);
+  if (!r.ok) throw new Error('bar window fetch failed');
+  return r.json();
+}
+
+// Fallback: random within the ALREADY-LOADED bars (old behaviour) — used if the
+// full-range fetch fails.
+function _randomWithinLoaded() {
+  const n = Replay.baseBars.length;
+  if (n < 20) return;
+  const lo = Math.max(1, Math.floor(n * 0.15));
+  const hi = Math.max(lo + 1, Math.floor(n * 0.85));
+  setCursorAtBarIdx(lo + Math.floor(Math.random() * (hi - lo + 1)));
+}
+
+// Above this many bars AFTER the cursor, a jump is treated as "deep history" and
+// gets a bounded window instead of a forward tail stretching to the present.
+// Must exceed the loaded window's own forward span (~2800) so a bounded session
+// doesn't keep reloading on step-back.
+const MAX_FORWARD_TAIL = 6000;
+
+// Load a bounded window around `ts` into baseBars: CONTEXT past bars to the left
+// + ~forward span to the right (to replay into). Lets replay operate at an
+// arbitrary HISTORICAL point outside the lazy-loaded recent window — shared by
+// random start AND resume-from-save. Returns the cursor index (the bar at/just
+// before ts), or -1 on failure (baseBars left untouched).
+async function _loadHistoryWindowAround(ts) {
+  const tf = window.App && window.App.currentTF;
+  const CONTEXT = 1600;               // past bars to the left
+  const FORWARD_MS = 45 * 86400000;   // ~45 days of bars to replay forward into
+  let [context, forward] = await Promise.all([
+    _fetchBarsWindow(tf, { before: String(ts + 1), limit: String(CONTEXT) }),
+    _fetchBarsWindow(tf, { start: tsToISO(ts + 1), end: tsToISO(ts + FORWARD_MS) }),
+  ]);
+  context = Array.isArray(context) ? context : [];
+  const lastCtxTs = context.length ? context[context.length - 1].timestamp : (ts - 1);
+  const fwd = (Array.isArray(forward) ? forward : []).filter(b => b.timestamp > lastCtxTs);
+  // Need SOME bars total — near the very start of history there's little/no left
+  // context (that's fine), so gate on the combined window, not context alone.
+  if (context.length + fwd.length < 20) return -1;
+  Replay.baseBars = context.concat(fwd);
+  Replay.displayTfMs = parseTfMs(tf);
+  return Math.max(0, context.length - 1);   // cursor = bar at/just before ts (0 at the very start)
+}
+
+/** Jump the replay cursor to a RANDOM bar — the "隨機K線" training start, where
+ *  you don't get to pick (and can't bias by eyeballing the setup). Picks a
+ *  random point across the FULL available history (not just the lazy-loaded
+ *  recent window), then loads a bounded window around it — CONTEXT bars of past
+ *  to the left + a forward span to replay into on the right — into baseBars.
+ *  Bounded (not full history) keeps the structure indicators fast; the live
+ *  chart / App.currentBars are untouched, so exiting replay returns to now. */
+async function pickRandomStart() {
+  if (!Replay.active) return;
+  if (Replay.picking) _cancelPick();
+  const App = window.App;
+  const status = document.getElementById('rep-status');
+  try {
+    const range = await fetch('/api/range?symbol=' + encodeURIComponent(App.currentSymbol)).then(r => r.json());
+    const startMs = range && range.start ? Date.parse(range.start) : NaN;
+    const endMs = range && range.end ? Date.parse(range.end) : NaN;
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) { _randomWithinLoaded(); return; }
+    // random target in the middle ~76% of the whole date range
+    const ts = Math.round(startMs + (0.12 + Math.random() * 0.76) * (endMs - startMs));
+    const idx = await _loadHistoryWindowAround(ts);
+    if (idx < 0) { _randomWithinLoaded(); return; }
+    await setCursorAtBarIdx(idx);
+  } catch (e) {
+    console.error('[replay] random-over-history failed', e);
+    _randomWithinLoaded();
+    return;
+  }
+  if (status) status.textContent = (window.I18n && window.I18n.t)
+    ? window.I18n.t('replay.statusRandom') : '已跳到隨機起點';
+}
+
+// ---- Start-point mode (split button: 選擇K線 / 隨機K線) ----
+const START_MODE_KEY = 'replayStartMode';
+const START_MODES = ['pick', 'random', 'date', 'earliest'];
+const START_MODE_LABEL = {   // trigger-button label i18n keys + fallbacks
+  pick: ['replay.pickBar', '選擇K線'], random: ['replay.pickRandom', '選擇隨機K線'],
+  date: ['replay.pickDate', '選擇日期'], earliest: ['replay.pickEarliest', '最早可用日期'],
+};
+function _loadStartMode() {
+  try { const m = localStorage.getItem(START_MODE_KEY); if (START_MODES.includes(m)) return m; } catch (e) { /* */ }
+  return 'pick';
+}
+// Set the active start mode: swap the trigger icon + label + highlight the menu.
+function _setStartMode(mode) {
+  if (!START_MODES.includes(mode)) return;
+  Replay.startMode = mode;
+  try { localStorage.setItem(START_MODE_KEY, mode); } catch (e) { /* */ }
+  document.querySelectorAll('#rep-pick-main .rpk-ic').forEach(el => {
+    el.classList.toggle('hidden', el.dataset.modeIcon !== mode);
+  });
+  const label = document.getElementById('rep-pick-label');
+  if (label) {
+    const [key, fallback] = START_MODE_LABEL[mode];
+    label.setAttribute('data-i18n', key);   // so a language flip re-translates it
+    label.textContent = (window.I18n && window.I18n.t) ? window.I18n.t(key) : fallback;
+  }
+  document.querySelectorAll('#rep-pick-menu .rpk-item').forEach(it => {
+    it.classList.toggle('active', it.dataset.mode === mode);
+  });
+}
+// Perform the currently-selected start mode.
+function _runStartMode() {
+  if (Replay.startMode === 'random') pickRandomStart();
+  else if (Replay.startMode === 'date') openDateDialog();
+  else if (Replay.startMode === 'earliest') jumpToFirstAvailable();
+  else enterPickMode();
+}
+function _toggleStartMenu(open) {
+  const group = document.getElementById('rep-pick-group');
+  const menu = document.getElementById('rep-pick-menu');
+  if (!group || !menu) return;
+  const willOpen = (open != null) ? open : menu.classList.contains('hidden');
+  menu.classList.toggle('hidden', !willOpen);
+  group.classList.toggle('open', willOpen);
+}
+
+// ---- 選擇日期 date picker (TradingView-style, day/month/year zoom) ----
+// All dates/times shown + picked are in the CHART's display timezone (ET) so they
+// match the x-axis — NOT the browser's local tz. Selection is stored as plain ET
+// Y/M/D + a "HH:mm" string; we convert ET wall-time → UTC ms only when jumping.
+const DP = { zoom: 'day', y: 0, mo: 0, d: 1, viewY: 0, viewM: 0, decade: 0, minMs: 0, maxMs: 0, time: '00:00' };
+const _DOW = ['週一', '週二', '週三', '週四', '週五', '週六', '週日'];
+const _MON = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
+const _pad2 = n => String(n).padStart(2, '0');
+const DP_TZ = 'America/New_York';
+// UTC ms → ET calendar parts.
+function _etParts(ms) {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: DP_TZ, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    .formatToParts(ms).reduce((a, x) => { a[x.type] = x.value; return a; }, {});
+  return { y: +p.year, mo: +p.month - 1, d: +p.day, hh: +p.hour, mm: +p.minute };
+}
+// ET wall-clock (y,mo,d,hh,mm) → UTC ms (one-step offset correction; the ~1h DST
+// gap ambiguity is irrelevant for a replay jump).
+function _etWallToMs(y, mo, d, hh, mm) {
+  const guess = Date.UTC(y, mo, d, hh, mm);
+  const et = _etParts(guess);
+  return guess - (Date.UTC(et.y, et.mo, et.d, et.hh, et.mm) - guess);
+}
+const _etDayStart = (y, mo, d) => _etWallToMs(y, mo, d, 0, 0);
+const _etDayEnd = (y, mo, d) => _etWallToMs(y, mo, d, 23, 59) + 59999;
+
+async function openDateDialog() {
+  if (!Replay.active) return;
+  if (Replay.picking) _cancelPick();
+  const modal = document.getElementById('rep-date-modal');
+  if (!modal) return;
+  try {
+    const range = await fetch('/api/range?symbol=' + encodeURIComponent(window.App.currentSymbol)).then(r => r.json());
+    DP.minMs = range && range.start ? Date.parse(range.start) : 0;
+    DP.maxMs = range && range.end ? Date.parse(range.end) : Date.now();
+  } catch (e) { DP.minMs = 0; DP.maxMs = Date.now(); }
+  const seed = Number.isFinite(Replay.cursorTimestamp) ? Replay.cursorTimestamp : DP.maxMs;
+  const p = _etParts(seed);
+  DP.y = p.y; DP.mo = p.mo; DP.d = p.d; DP.viewY = p.y; DP.viewM = p.mo;
+  DP.decade = Math.floor(p.y / 20) * 20; DP.zoom = 'day';
+  DP.time = _pad2(p.hh) + ':' + _pad2(p.mm);
+  document.getElementById('rdp-time-field').value = DP.time;
+  _renderDatePicker(); _buildTimeMenu();
+  modal.classList.remove('hidden');
+}
+function closeDateDialog() {
+  const m = document.getElementById('rep-date-modal'); if (m) m.classList.add('hidden');
+  const tm = document.getElementById('rdp-time-menu'); if (tm) tm.classList.add('hidden');
+}
+
+function _renderDatePicker() {
+  const head = document.getElementById('rdp-head'), grid = document.getElementById('rdp-grid');
+  if (!head || !grid) return;
+  grid.innerHTML = ''; grid.className = 'rdp-grid ' + DP.zoom;
+  document.getElementById('rdp-date-field').value = `${DP.y}-${_pad2(DP.mo + 1)}-${_pad2(DP.d)}`;
+  const mk = (cls, txt) => { const c = document.createElement('div'); c.className = 'rdp-cell ' + cls; c.textContent = txt; return c; };
+
+  if (DP.zoom === 'day') {
+    head.textContent = `${_MON[DP.viewM]} ${DP.viewY}`;
+    for (const d of _DOW) grid.appendChild(mk('dow', d));
+    const lead = (new Date(DP.viewY, DP.viewM, 1).getDay() + 6) % 7;   // Mon-first (weekday is tz-agnostic)
+    for (let i = 0; i < lead; i++) grid.appendChild(mk('empty', ''));
+    const days = new Date(DP.viewY, DP.viewM + 1, 0).getDate();
+    for (let d = 1; d <= days; d++) {
+      const cell = mk('', d);
+      const inRange = _etDayEnd(DP.viewY, DP.viewM, d) >= DP.minMs && _etDayStart(DP.viewY, DP.viewM, d) <= DP.maxMs;
+      if (!inRange) cell.classList.add('disabled');
+      if (DP.y === DP.viewY && DP.mo === DP.viewM && DP.d === d) cell.classList.add('selected');
+      if (inRange) cell.addEventListener('click', () => { DP.y = DP.viewY; DP.mo = DP.viewM; DP.d = d; _renderDatePicker(); });
+      grid.appendChild(cell);
+    }
+  } else if (DP.zoom === 'month') {
+    head.textContent = String(DP.viewY);
+    for (let m = 0; m < 12; m++) {
+      const cell = mk('', _MON[m]);
+      const lastD = new Date(DP.viewY, m + 1, 0).getDate();
+      const inRange = _etDayEnd(DP.viewY, m, lastD) >= DP.minMs && _etDayStart(DP.viewY, m, 1) <= DP.maxMs;
+      if (!inRange) cell.classList.add('disabled');
+      if (DP.y === DP.viewY && DP.mo === m) cell.classList.add('selected');
+      if (inRange) cell.addEventListener('click', () => { DP.viewM = m; DP.zoom = 'day'; _renderDatePicker(); });
+      grid.appendChild(cell);
+    }
+  } else {   // year
+    head.textContent = `${DP.decade} - ${DP.decade + 19}`;
+    for (let i = 0; i < 20; i++) {
+      const y = DP.decade + i, cell = mk('', y);
+      const inRange = _etDayEnd(y, 11, 31) >= DP.minMs && _etDayStart(y, 0, 1) <= DP.maxMs;
+      if (!inRange) cell.classList.add('disabled');
+      if (DP.viewY === y) cell.classList.add('selected');
+      if (inRange) cell.addEventListener('click', () => { DP.viewY = y; DP.zoom = 'month'; _renderDatePicker(); });
+      grid.appendChild(cell);
+    }
+  }
+}
+// Head click drills UP a zoom level (day→month→year); arrows page within a level.
+function _dpHeadClick() {
+  if (DP.zoom === 'day') DP.zoom = 'month';
+  else if (DP.zoom === 'month') { DP.zoom = 'year'; DP.decade = Math.floor(DP.viewY / 20) * 20; }
+  _renderDatePicker();
+}
+function _dpNav(dir) {
+  if (DP.zoom === 'day') { DP.viewM += dir; if (DP.viewM < 0) { DP.viewM = 11; DP.viewY--; } if (DP.viewM > 11) { DP.viewM = 0; DP.viewY++; } }
+  else if (DP.zoom === 'month') DP.viewY += dir;
+  else DP.decade += dir * 20;
+  _renderDatePicker();
+}
+function _buildTimeMenu() {
+  const menu = document.getElementById('rdp-time-menu'); if (!menu) return;
+  menu.innerHTML = '';
+  let stepMin = Math.round(parseTfMs(window.App.currentTF) / 60000);
+  if (!(stepMin > 0) || stepMin >= 1440) stepMin = 1440;
+  const times = stepMin >= 1440 ? ['00:00'] : [];
+  if (stepMin < 1440) for (let m = 0; m < 1440; m += stepMin) times.push(_pad2(Math.floor(m / 60)) + ':' + _pad2(m % 60));
+  for (const t of times) {
+    const o = document.createElement('div'); o.className = 'rdp-time-opt' + (t === DP.time ? ' sel' : ''); o.textContent = t;
+    o.addEventListener('click', () => {
+      DP.time = t; document.getElementById('rdp-time-field').value = t;
+      menu.classList.add('hidden');
+    });
+    menu.appendChild(o);
+  }
+}
+async function _dpConfirm() {
+  const [hh, mm] = DP.time.split(':').map(Number);
+  const chosen = _etWallToMs(DP.y, DP.mo, DP.d, hh, mm);   // ET wall-time → UTC ms
+  const clamped = Math.max(DP.minMs, Math.min(DP.maxMs, chosen));
+  closeDateDialog();
+  await setCursorAtTimestamp(clamped);
+}
+// "最早可用日期" — jump replay to the very first available bar.
+async function jumpToFirstAvailable() {
+  if (!Replay.active) return;
+  if (Replay.picking) _cancelPick();
+  try {
+    const range = await fetch('/api/range?symbol=' + encodeURIComponent(window.App.currentSymbol)).then(r => r.json());
+    const minMs = range && range.start ? Date.parse(range.start) : null;
+    if (minMs == null) { _randomWithinLoaded(); return; }
+    await setCursorAtTimestamp(minMs);
+  } catch (e) { console.error('[replay] first-available failed', e); }
+}
+
 // ---- Init ----
 function init(chart) {
   Replay.chart = chart;
@@ -1765,7 +2102,57 @@ function init(chart) {
     else enterReplay();
   });
 
-  document.getElementById('rep-pick').addEventListener('click', enterPickMode);
+  // Start-point split button: main runs the selected mode; caret opens the menu;
+  // picking a mode swaps the icon/label and runs it (TradingView-style).
+  _setStartMode(_loadStartMode());
+  const pickMain = document.getElementById('rep-pick-main');
+  const pickCaret = document.getElementById('rep-pick-caret');
+  const pickMenu = document.getElementById('rep-pick-menu');
+  if (pickMain) pickMain.addEventListener('click', () => { _toggleStartMenu(false); _runStartMode(); });
+  if (pickCaret) pickCaret.addEventListener('click', (e) => { e.stopPropagation(); _toggleStartMenu(); });
+  if (pickMenu) pickMenu.querySelectorAll('.rpk-item').forEach(it => {
+    it.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // "最新K棒" is a one-shot NAVIGATION action, NOT a persisted start mode:
+      // return to the latest bar WITHOUT counting as replay progress. In a live
+      // browse → App.goToLatest; in replay → view-only scroll to the cursor
+      // (no cursor move / no record wipe).
+      if (it.dataset.mode === 'latest') {
+        _toggleStartMenu(false);
+        if (window.App && window.App.browsing && window.App.goToLatest) window.App.goToLatest();
+        else Replay.scrollViewToCursor();
+        return;
+      }
+      _setStartMode(it.dataset.mode);
+      _toggleStartMenu(false);
+      _runStartMode();
+    });
+  });
+  document.addEventListener('click', (e) => {
+    const group = document.getElementById('rep-pick-group');
+    if (group && !group.contains(e.target)) _toggleStartMenu(false);
+    // close the date picker's time dropdown on any click outside the time field
+    const tm = document.getElementById('rdp-time-menu');
+    const tw = e.target.closest && e.target.closest('.rdp-input-wrap');
+    if (tm && !tm.classList.contains('hidden') && !(tw && tw.contains(document.getElementById('rdp-time-menu')))) tm.classList.add('hidden');
+  });
+
+  // Date picker controls
+  const _dpBtn = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  _dpBtn('rdp-close', closeDateDialog);
+  _dpBtn('rdp-cancel', closeDateDialog);
+  _dpBtn('rdp-ok', _dpConfirm);
+  _dpBtn('rdp-first', () => { closeDateDialog(); jumpToFirstAvailable(); });
+  _dpBtn('rdp-prev', () => _dpNav(-1));
+  _dpBtn('rdp-next', () => _dpNav(1));
+  _dpBtn('rdp-head', _dpHeadClick);
+  const timeField = document.getElementById('rdp-time-field');
+  if (timeField) timeField.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const tm = document.getElementById('rdp-time-menu');
+    if (tm) { tm.classList.toggle('hidden'); const sel = tm.querySelector('.rdp-time-opt.sel'); if (sel && !tm.classList.contains('hidden')) sel.scrollIntoView({ block: 'center' }); }
+  });
+
   document.getElementById('rep-play').addEventListener('click', togglePlay);
   document.getElementById('rep-step-back').addEventListener('click', stepBack);
   document.getElementById('rep-step').addEventListener('click', async () => {

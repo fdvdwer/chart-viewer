@@ -52,6 +52,12 @@
   // them on the read-only mini doesn't make sense).
   const _miniArrowIdBy    = new Map();
   const _miniDurationIdBy = new Map();
+  // Mini-chart bracket bands + entry lines. Read-only (lock:true on
+  // create) so the sub-chart shows the branch's position box (entry /
+  // TP / SL) without the draggable handles the main chart's bands have.
+  const _miniBandIdBy      = new Map();
+  const _miniEntryLineIdBy = new Map();
+  const _miniBeLineIdBy    = new Map();
   // Bracket bands: keyed by `${positionId}.tp` / `${positionId}.sl` so
   // the TP and SL legs of a position are tracked independently and can
   // be added / removed individually.
@@ -60,6 +66,14 @@
   // sitting at the entry price. Renders in BLUE (#2962ff) to pair with
   // the entry ticket DOM in #sim-bracket-tickets. Keyed by positionId.
   const _entryLineIdBy = new Map();
+  // Adjusted break-even line (sim-multi-tp-feature "risk-free runner"):
+  // one full-width dashed PURPLE line per open position, drawn ONLY once
+  // the position has banked realised P/L from a partial exit (otherwise
+  // it coincides with the entry line and is hidden). Sits at
+  //   avgEntry − realisedPnL / (qty · dir · pv · lot)
+  // i.e. the price at which the runner giving back exactly the banked
+  // gains nets the whole trade to zero. Keyed by positionId.
+  const _beLineIdBy = new Map();
 
   let _registered = false;
 
@@ -220,6 +234,49 @@
       },
     });
 
+    // ----- Adjusted break-even line -----
+    //
+    // Horizontal dashed PURPLE line at the "risk-free runner" break-even
+    // (avgEntry adjusted for banked realised P/L). Distinct from the blue
+    // entry line so the user can read both at once. A short label sits at
+    // the left edge over a translucent chip; the text is precomputed in
+    // _syncBrackets (extendData.label) so this builder stays i18n-free.
+    // One per open position, only present when realised P/L has moved the
+    // BE off the entry (see _syncBrackets).
+    klinecharts.registerOverlay({
+      name: 'sim_be_line',
+      totalStep: 2,
+      lock: true,
+      needDefaultPointFigure: false,
+      needDefaultXAxisFigure: false,
+      needDefaultYAxisFigure: false,
+      createPointFigures: ({ coordinates, overlay, bounding }) => {
+        if (!coordinates || coordinates.length < 1 || !bounding) return [];
+        const y = coordinates[0].y;
+        const ext = (overlay && overlay.extendData) || {};
+        const color = '#9575cd';
+        const figs = [{
+          type: 'line',
+          attrs: { coordinates: [{ x: 0, y }, { x: bounding.width, y }] },
+          styles: { color, size: 1, style: 'dashed', dashedValue: [6, 4] },
+        }];
+        if (ext.label) {
+          figs.push({
+            type: 'text',
+            attrs: { x: 6, y: y - 2, text: ext.label, align: 'left', baseline: 'bottom' },
+            styles: {
+              color: '#ffffff', size: 10,
+              family: 'system-ui,-apple-system,sans-serif',
+              backgroundColor: 'rgba(149,117,205,0.85)',
+              borderColor: 'transparent', borderSize: 0,
+              paddingLeft: 4, paddingRight: 4, paddingTop: 1, paddingBottom: 1,
+            },
+          });
+        }
+        return figs;
+      },
+    });
+
     // ----- Bracket band (TP and SL) -----
     //
     // We register two near-identical templates so each leg can have its
@@ -231,8 +288,15 @@
     //   TP green   #089981  (var --sim-tp-color)
     //   SL orange  #ff9800  (var --sim-sl-color)
     // Hardcoded here because KLineChart figures don't read CSS vars.
-    _registerBracketTemplate('sim_bracket_band_tp', '#089981');
-    _registerBracketTemplate('sim_bracket_band_sl', '#ff9800');
+    _registerBracketTemplate('sim_bracket_band_tp', '#089981', false);
+    _registerBracketTemplate('sim_bracket_band_sl', '#ff9800', false);
+    // Draggable variants for COMMITTED legs on the main chart: a proper
+    // finished (totalStep:1) overlay with a default point handle so the
+    // user can grab the line and drag it to re-price (onPressedMoveEnd →
+    // modifyOrder). The plain variants above stay locked/handle-less for
+    // the DOM-ticket-driven proposal leg and the read-only mini.
+    _registerBracketTemplate('sim_bracket_band_tp_drag', '#089981', true);
+    _registerBracketTemplate('sim_bracket_band_sl_drag', '#ff9800', true);
 
     klinecharts.registerOverlay({
       name: 'sim_position_duration',
@@ -281,22 +345,30 @@
   // Bracket template — shared figure builder + drag handler so the TP
   // and SL templates differ only by their `styles.point` color.
   // ------------------------------------------------------------------
-  function _registerBracketTemplate(name, accentColor) {
+  function _registerBracketTemplate(name, accentColor, draggable) {
     if (typeof klinecharts === 'undefined' || !klinecharts.registerOverlay) return;
-    klinecharts.registerOverlay({
+    const spec = {
       name,
-      totalStep: 2,
-      lock: true,                     // no canvas drag — ticket DOM is the drag affordance
-      needDefaultPointFigure: false,  // hide the floating circle handle
+      // draggable → totalStep:1 (a finished, single-point overlay whose
+      // point is a draggable anchor). Non-draggable proposal/mini legs keep
+      // totalStep:2 + no handle; their drag is the DOM ticket.
+      totalStep: draggable ? 1 : 2,
+      lock: !draggable,
+      needDefaultPointFigure: !!draggable,   // hover shows the grab handle
       needDefaultXAxisFigure: false,
       needDefaultYAxisFigure: false,
-      // No styles.point and no performEventPressedMove — the bracket's
-      // drag is now driven entirely from the DOM ticket via
-      // Panel._wireTicketDrag (vertical mouse drag on the ticket).
-      // This keeps the visual handle and the price line locked at the
-      // same X (right:110px) regardless of how the chart is panned.
       createPointFigures: (params) => _buildBracketFigures(params, accentColor),
-    });
+    };
+    if (draggable) {
+      // Anchor handle (appears on hover at the point = right edge / exit
+      // price). Grab it to drag the line; onPressedMoveEnd re-prices.
+      spec.styles = { point: {
+        color: accentColor, borderColor: '#ffffff', borderSize: 1,
+        radius: 5, activeRadius: 6,
+      } };
+      spec.onPressedMoveEnd = (event) => _onBracketDragEnd(event);
+    }
+    klinecharts.registerOverlay(spec);
   }
 
   /** Shared figure builder for TP / SL bracket bands.
@@ -347,10 +419,20 @@
     }
     // Price line: dashed during pending/editing, SOLID when armed.
     if (phase === 'armed') {
+      // Progressive display (user spec): the ACTIVE leg (nearest unfilled
+      // TP, or an SL) is a full-opacity 2px line; a dimmed later TP is a
+      // translucent 1px line. When the active TP fills its band drops and
+      // the next TP loses its `dim` flag → brightens on the next sync.
+      const dim = !!ext.dim;
       figures.push({
         type: 'line',
         attrs: { coordinates: [{ x: 0, y: exitY }, { x: rightX, y: exitY }] },
-        styles: { color: strokeColor, size: 2, style: 'solid' },
+        // Active leg → solid 2px full-opacity. A queued later TP → faint
+        // 1px dashed so it reads as "not your turn yet"; it turns solid +
+        // bright automatically once it becomes the nearest unfilled TP.
+        styles: dim
+          ? { color: `rgba(${rgb}, 0.45)`, size: 1, style: 'dashed', dashedValue: [4, 4] }
+          : { color: strokeColor, size: 2, style: 'solid' },
       });
     } else {
       figures.push({
@@ -362,9 +444,36 @@
     return figures;
   }
 
-  // _bracketDragHandler removed — DOM-side drag in sim_panel.js
-  // (Panel._wireTicketDrag) replaces the canvas-driven drag now that
-  // bracket templates have lock:true + needDefaultPointFigure:false.
+  /** Commit a committed-leg drag: read the dragged price off the overlay
+   *  point, snap to tick, and re-price the engine order. The in-proposal
+   *  draft leg has no childOrderId and is locked, so this never fires for
+   *  it. Dragging opts the bracket into the reduce-only group (OCO
+   *  stripped) exactly like editing a row in the panel list. */
+  function _onBracketDragEnd(event) {
+    const ov  = event && event.overlay;
+    const ext = ov && ov.extendData;
+    if (!ov || !ext || ext.childOrderId == null) return false;
+    const pt = ov.points && ov.points[0];
+    if (!pt || !Number.isFinite(pt.value)) return false;
+    const Ctrl  = window.SimController;
+    const Panel = window.SimPanel;
+    const eng   = Ctrl && Ctrl.engine;
+    if (!eng) return false;
+    const order = eng.getOrder(ext.childOrderId);
+    if (!order) return false;
+    const tick = (Ctrl.spec && Ctrl.spec.tickSize) || 0.01;
+    const price = +(Math.round(pt.value / tick) * tick).toFixed(10);
+    if (Panel && Panel._stripBracketOco && order.bracketParentId != null) {
+      Panel._stripBracketOco(order.bracketParentId);
+    }
+    eng.modifyOrder(order.id,
+      order.type === 'limit' ? { price } : { stopPrice: price });
+    if (Ctrl._tickNow)   Ctrl._tickNow();
+    if (Ctrl._markDirty) Ctrl._markDirty();
+    if (Panel && Panel.refresh) { try { Panel.refresh(); } catch (e) {} }
+    sync();
+    return false;
+  }
 
   function _hexToRgbTuple(hex) {
     const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex || '');
@@ -464,6 +573,16 @@
         branchId: miniBranchId,
         idBy: _miniDurationIdBy,
       });
+      // Position box (entry line + TP/SL bands) for the mini's branch.
+      // read-only so the sub-chart mirrors the box without draggable
+      // handles; own id-maps so it doesn't clobber the main chart's.
+      _syncBrackets(Mini.chart, eng, {
+        branchId: miniBranchId,
+        idBy: _miniBandIdBy,
+        entryIdBy: _miniEntryLineIdBy,
+        beIdBy: _miniBeLineIdBy,
+        readOnly: true,
+      });
     } else {
       // Mini closed or no branch set — wipe any stale overlays from
       // the mini chart's overlay-id maps so the next open re-creates
@@ -486,6 +605,18 @@
       if (chart) try { chart.removeOverlay(id); } catch (e) {}
     }
     _miniDurationIdBy.clear();
+    for (const [, id] of _miniBandIdBy) {
+      if (chart) try { chart.removeOverlay(id); } catch (e) {}
+    }
+    _miniBandIdBy.clear();
+    for (const [, id] of _miniEntryLineIdBy) {
+      if (chart) try { chart.removeOverlay(id); } catch (e) {}
+    }
+    _miniEntryLineIdBy.clear();
+    for (const [, id] of _miniBeLineIdBy) {
+      if (chart) try { chart.removeOverlay(id); } catch (e) {}
+    }
+    _miniBeLineIdBy.clear();
   }
 
   function _syncPendingOrders(chart, eng) {
@@ -619,31 +750,33 @@
           }
         }
       }
-      // Exit arrow (closed positions only).
-      if (pos.closedAtBarTs != null && pos.exitOrderIds && pos.exitOrderIds.length) {
-        // Branch filter — exit also has to be at-or-before the cutoff.
-        // If the position closed AFTER active's fork cutoff, it closed
-        // in a different timeline — show only the inherited entry, not
-        // the exit (which "didn't happen" in active's timeline).
-        const exitOrder = eng.getOrder(pos.exitOrderIds[pos.exitOrderIds.length - 1]);
-        if (exitOrder && Number.isFinite(exitOrder.filledAtBarTs)) {
-          const exitInFork = !Number.isFinite(pos.closedAtBarTs) || pos.closedAtBarTs <= cutoff;
-          const exitInPast = (cursorTs == null) || (exitOrder.filledAtBarTs <= cursorTs);
-          if (exitInFork && exitInPast) {
-            const bar = _findBarByTimestamp(exitOrder.filledAtBarTs);
-            if (bar) {
-              // Long exit → red ↓ above high; short exit → blue ↑ below low.
-              const isUp = pos.side === 'short';
-              want.set(`${pos.id}.exit`, {
-                ts: bar.timestamp,
-                value: isUp ? bar.low : bar.high,
-                isUp,
-                posId: pos.id,
-                event: 'exit',
-                ext: { side: pos.side, event: 'exit', inherited, stackIndex: 0 },
-              });
-            }
-          }
+      // Exit arrows — one per FILLED exit order. This now includes PARTIAL
+      // reduce-only fills on a still-open position (e.g. TP1 closing 1 of 3
+      // lots), so each scale-out drops its own 平倉 triangle at the fill bar;
+      // the final close of a closed position is just the last one. (user
+      // spec: "TP1 到了 → 出現平倉的三角形".) Each exit is keyed by its own
+      // order id so partials don't collide.
+      if (pos.exitOrderIds && pos.exitOrderIds.length) {
+        for (const exId of pos.exitOrderIds) {
+          const exitOrder = eng.getOrder(exId);
+          if (!exitOrder || !Number.isFinite(exitOrder.filledAtBarTs)) continue;
+          const evTs = exitOrder.filledAtBarTs;
+          // Branch + replay-cursor filters, per exit event.
+          const exitInFork = evTs <= cutoff;
+          const exitInPast = (cursorTs == null) || (evTs <= cursorTs);
+          if (!exitInFork || !exitInPast) continue;
+          const bar = _findBarByTimestamp(evTs);
+          if (!bar) continue;
+          // Long exit → red ↓ above high; short exit → blue ↑ below low.
+          const isUp = pos.side === 'short';
+          want.set(`${pos.id}.exit.${exId}`, {
+            ts: bar.timestamp,
+            value: isUp ? bar.low : bar.high,
+            isUp,
+            posId: pos.id,
+            event: 'exit',
+            ext: { side: pos.side, event: 'exit', inherited, stackIndex: 0 },
+          });
         }
       }
     }
@@ -775,7 +908,24 @@
     }
   }
 
-  function _syncBrackets(chart, eng) {
+  function _syncBrackets(chart, eng, opts) {
+    // opts (mini-chart parallel — same pattern as _syncTradeArrows /
+    // _syncPositionDuration): { idBy, entryIdBy, branchId, readOnly }.
+    //   - idBy / entryIdBy : per-chart overlay-id maps so main + mini
+    //       don't clobber each other's band / entry-line overlays.
+    //       Default to the main-chart maps.
+    //   - branchId : when set, only draw positions on that branch (the
+    //       mini shows the miniBranchId timeline). Main passes none →
+    //       no filter, unchanged behaviour.
+    //   - readOnly : lock created overlays so the sub-chart's bands
+    //       aren't draggable (display mirror, not editable).
+    const bandIdBy       = (opts && opts.idBy)      || _bandIdBy;
+    const entryIdBy      = (opts && opts.entryIdBy) || _entryLineIdBy;
+    const filterBranchId = (opts && opts.branchId)  || null;
+    const readOnly       = !!(opts && opts.readOnly);
+    // Committed legs on the main (editable) chart use the draggable
+    // template variant; the read-only mini keeps the plain locked one.
+    const dragSuffix     = readOnly ? '' : '_drag';
     // For each open position, draw 0–2 bracket bands (TP and / or SL).
     // The exit price comes from one of two sources:
     //
@@ -807,6 +957,7 @@
     // creation order; later overlays paint on top).
     const wantEntry = new Map();   // positionId → { ts, value, side }
     for (const pos of eng.getPositions()) {
+      if (filterBranchId && pos.branchId !== filterBranchId) continue;
       const eo = (pos.entryOrderIds && pos.entryOrderIds.length)
         ? eng.getOrder(pos.entryOrderIds[0]) : null;
       if (!eo || !Number.isFinite(eo.filledAtBarTs)) continue;
@@ -816,30 +967,81 @@
         side: pos.side,
       });
     }
-    for (const [posId, chartId] of _entryLineIdBy.entries()) {
+    for (const [posId, chartId] of entryIdBy.entries()) {
       if (!wantEntry.has(posId)) {
         try { chart.removeOverlay(chartId); } catch (e) { /* ignore */ }
-        _entryLineIdBy.delete(posId);
+        entryIdBy.delete(posId);
       }
     }
     for (const [posId, info] of wantEntry.entries()) {
       const points = [{ timestamp: info.ts, value: info.value }];
       const ext = { side: info.side };
-      const existing = _entryLineIdBy.get(posId);
+      const existing = entryIdBy.get(posId);
       if (existing) {
         try { chart.overrideOverlay({ id: existing, points, extendData: ext }); }
         catch (e) { /* ignore */ }
       } else {
         try {
-          const newId = chart.createOverlay({
-            name: 'sim_entry_line', points, extendData: ext,
-          });
-          if (newId) _entryLineIdBy.set(posId, newId);
+          const espec = { name: 'sim_entry_line', points, extendData: ext };
+          if (readOnly) espec.lock = true;
+          const newId = chart.createOverlay(espec);
+          if (newId) entryIdBy.set(posId, newId);
+        } catch (e) { /* ignore */ }
+      }
+    }
+
+    // ----- Adjusted break-even lines -----------------------------------
+    // Mirror the entry-line sync, but only WANT a line for positions whose
+    // banked realised P/L has shifted the break-even at least half a tick
+    // off the entry (below entry when banked profit on a long, above on a
+    // short). When realised P/L is 0 the adjusted BE coincides with the
+    // entry line, so we draw nothing and let the entry line stand in.
+    const beIdBy = (opts && opts.beIdBy) || _beLineIdBy;
+    const t_ = (window.I18n && window.I18n.t) || ((k) => k);
+    const tick = spec.tickSize || 0.01;
+    const wantBe = new Map();   // positionId → { ts, value, label }
+    for (const pos of eng.getPositions()) {
+      if (filterBranchId && pos.branchId !== filterBranchId) continue;
+      const eo = (pos.entryOrderIds && pos.entryOrderIds.length)
+        ? eng.getOrder(pos.entryOrderIds[0]) : null;
+      if (!eo || !Number.isFinite(eo.filledAtBarTs)) continue;
+      const R = pos.realisedPnL;
+      if (!Number.isFinite(R) || Math.abs(R) < 1e-9 || pos.qty <= 1e-9) continue;
+      const dir = pos.side === 'long' ? 1 : -1;
+      const shift = R / (pos.qty * dir * pv * lot);
+      if (!Number.isFinite(shift) || Math.abs(shift) < tick * 0.5) continue;
+      const adjBe = pos.avgEntryPrice - shift;
+      wantBe.set(pos.id, {
+        ts: eo.filledAtBarTs,
+        value: adjBe,
+        label: t_('sim.beAdjLabel') + ' ' + adjBe.toFixed(2),
+      });
+    }
+    for (const [posId, chartId] of beIdBy.entries()) {
+      if (!wantBe.has(posId)) {
+        try { chart.removeOverlay(chartId); } catch (e) { /* ignore */ }
+        beIdBy.delete(posId);
+      }
+    }
+    for (const [posId, info] of wantBe.entries()) {
+      const points = [{ timestamp: info.ts, value: info.value }];
+      const ext = { label: info.label };
+      const existing = beIdBy.get(posId);
+      if (existing) {
+        try { chart.overrideOverlay({ id: existing, points, extendData: ext }); }
+        catch (e) { /* ignore */ }
+      } else {
+        try {
+          const espec = { name: 'sim_be_line', points, extendData: ext };
+          if (readOnly) espec.lock = true;
+          const newId = chart.createOverlay(espec);
+          if (newId) beIdBy.set(posId, newId);
         } catch (e) { /* ignore */ }
       }
     }
 
     for (const pos of eng.getPositions()) {
+      if (filterBranchId && pos.branchId !== filterBranchId) continue;
       const entryOrder = (pos.entryOrderIds && pos.entryOrderIds.length)
         ? eng.getOrder(pos.entryOrderIds[0]) : null;
       if (!entryOrder || !Number.isFinite(entryOrder.filledAtBarTs)) continue;
@@ -856,71 +1058,77 @@
       // solid line, no fill).
       const phase = inProposal ? (ps.phase || 'pending') : 'armed';
       const validity = (inProposal && ps.validity) || {};
+      // "drafting" = the user is actively placing / re-editing the FIRST
+      // leg via the DOM ticket (pending or editing). Only then do we show
+      // the single scalar ps.tp/ps.sl draft band. Once ARMED (committed) —
+      // or when there's no proposal at all — we render EVERY committed
+      // child as its own draggable band, so added TP2/TP3 legs appear and
+      // can be dragged. (Previously armed was lumped in with drafting, so
+      // multi-segment legs never drew until the proposal went away.)
+      const drafting = inProposal && (phase === 'pending' || phase === 'editing');
+
+      // Shared band emitter for a single exit leg. `childId` is the engine
+      // order id for a COMMITTED leg (null for the in-proposal draft leg) —
+      // it makes the band draggable and tells the drag handler which order
+      // to re-price on release.
+      const emitBand = (key, template, leg, exitPrice, legQty, dragging, invalid, childId, dim) => {
+        const usd = (exitPrice - pos.avgEntryPrice) * dir * legQty * pv * lot;
+        want.set(key, {
+          template,
+          exitPrice,
+          ext: {
+            leg, dragging, phase, invalid,
+            dim: !!dim,
+            usdLabel: fmtUSD(usd),
+            qty: legQty,
+            entryPrice: pos.avgEntryPrice,
+            entryTs, anchorTs,
+            childOrderId: (childId != null) ? childId : null,
+          },
+        });
+      };
 
       // -------- TP --------
-      let tpPrice = null;
-      if (inProposal && Number.isFinite(ps.tp)) {
-        tpPrice = ps.tp;
-      } else if (!inProposal) {
-        const child = eng.getPendingOrders().find(
-          o => o.bracketParentId === entryOrder.id && o.type === 'limit');
-        if (child) tpPrice = child.price;
-      }
-      if (Number.isFinite(tpPrice)) {
-        const usd = (tpPrice - pos.avgEntryPrice) * dir * pos.qty * pv * lot;
-        const dragging = !!(ps && ps.draggingLeg === 'tp' && inProposal);
-        want.set(`${pos.id}.tp`, {
-          template: 'sim_bracket_band_tp',
-          exitPrice: tpPrice,
-          ext: {
-            leg: 'tp',
-            dragging,
-            phase,
-            invalid: validity.tp === 'invalid',
-            usdLabel: fmtUSD(usd),
-            qty: pos.qty,
-            entryPrice: pos.avgEntryPrice,
-            entryTs,
-            anchorTs,
-          },
+      // In an active proposal, the single draggable primary leg (ps.tp).
+      // Committed, render EVERY TP leg as its own band (multi-segment
+      // reduce-only brackets) with the leg's own qty — so the user sees
+      // "TP1 = 1 lot / TP2 = 1 lot" and the runner's remaining size.
+      if (drafting && Number.isFinite(ps.tp)) {
+        emitBand(`${pos.id}.tp`, 'sim_bracket_band_tp', 'tp', ps.tp, pos.qty,
+          !!(ps.draggingLeg === 'tp'), validity.tp === 'invalid');
+      } else if (!drafting) {
+        // Nearest-to-entry TP is the ACTIVE target (full opacity); farther
+        // TPs are dimmed. As each TP fills its band drops and the next one
+        // becomes nearest → brightens automatically. (user spec: "TP1 亮,
+        // TP2 半透明; TP1 到了就換 TP2 亮起".)
+        const tpChildren = eng.getPendingOrders().filter(
+          o => o.bracketParentId === entryOrder.id && o.type === 'limit')
+          .sort((a, b) => Math.abs(a.price - pos.avgEntryPrice) - Math.abs(b.price - pos.avgEntryPrice));
+        tpChildren.forEach((child, i) => {
+          emitBand(`${pos.id}.tp.${child.id}`, 'sim_bracket_band_tp' + dragSuffix, 'tp',
+            child.price, child.qty, false, false, child.id, i > 0);
         });
       }
 
       // -------- SL --------
-      let slPrice = null;
-      if (inProposal && Number.isFinite(ps.sl)) {
-        slPrice = ps.sl;
-      } else if (!inProposal) {
-        const child = eng.getPendingOrders().find(
+      if (drafting && Number.isFinite(ps.sl)) {
+        emitBand(`${pos.id}.sl`, 'sim_bracket_band_sl', 'sl', ps.sl, pos.qty,
+          !!(ps.draggingLeg === 'sl'), validity.sl === 'invalid');
+      } else if (!drafting) {
+        const slChildren = eng.getPendingOrders().filter(
           o => o.bracketParentId === entryOrder.id && o.type === 'stop');
-        if (child) slPrice = child.stopPrice;
-      }
-      if (Number.isFinite(slPrice)) {
-        const usd = (slPrice - pos.avgEntryPrice) * dir * pos.qty * pv * lot;
-        const dragging = !!(ps && ps.draggingLeg === 'sl' && inProposal);
-        want.set(`${pos.id}.sl`, {
-          template: 'sim_bracket_band_sl',
-          exitPrice: slPrice,
-          ext: {
-            leg: 'sl',
-            dragging,
-            phase,
-            invalid: validity.sl === 'invalid',
-            usdLabel: fmtUSD(usd),
-            qty: pos.qty,
-            entryPrice: pos.avgEntryPrice,
-            entryTs,
-            anchorTs,
-          },
-        });
+        for (const child of slChildren) {
+          emitBand(`${pos.id}.sl.${child.id}`, 'sim_bracket_band_sl' + dragSuffix, 'sl',
+            child.stopPrice, child.qty, false, false, child.id);
+        }
       }
     }
 
     // Drop bands no longer wanted.
-    for (const [key, chartId] of _bandIdBy.entries()) {
+    for (const [key, chartId] of bandIdBy.entries()) {
       if (!want.has(key)) {
         try { chart.removeOverlay(chartId); } catch (e) { /* ignore */ }
-        _bandIdBy.delete(key);
+        bandIdBy.delete(key);
       }
     }
     // Add / update kept ones. Single point at (anchorTs, exitPrice) —
@@ -932,16 +1140,21 @@
         ? info.ext.anchorTs
         : info.ext.entryTs;
       const points = [{ timestamp: ts, value: info.exitPrice }];
-      const existing = _bandIdBy.get(key);
+      const existing = bandIdBy.get(key);
       if (existing) {
         try { chart.overrideOverlay({ id: existing, points, extendData: info.ext }); }
         catch (e) { /* ignore */ }
       } else {
         try {
-          const newId = chart.createOverlay({
-            name: info.template, points, extendData: info.ext,
-          });
-          if (newId) _bandIdBy.set(key, newId);
+          const bspec = { name: info.template, points, extendData: info.ext };
+          // A committed leg on the MAIN chart is draggable (grab the line
+          // to re-price → _onBracketDragEnd → modifyOrder). The in-proposal
+          // draft leg stays DOM-ticket-driven (locked), and every leg on
+          // the read-only mini stays locked.
+          const draggable = !readOnly && info.ext.childOrderId != null;
+          bspec.lock = !draggable;
+          const newId = chart.createOverlay(bspec);
+          if (newId) bandIdBy.set(key, newId);
         } catch (e) { /* ignore */ }
       }
     }
@@ -962,6 +1175,7 @@
     drop(_durationIdBy);
     drop(_bandIdBy);
     drop(_entryLineIdBy);
+    drop(_beLineIdBy);
   }
 
   /** Set / clear the preview price for an order. Called by sim_panel

@@ -164,26 +164,30 @@ async function loadTimeframe(tf) {
   try {
     let bars = await fetchOHLCV(tf, { limit: INITIAL_BARS });
 
-    // If replay is active and cursor falls before the loaded range, keep
-    // fetching older pages until cursor is covered (or safety cap reached).
-    const cursorTS = (window.Replay && window.Replay.active)
-      ? window.Replay.cursorTimestamp : null;
-    if (cursorTS && bars.length && bars[0].timestamp > cursorTS) {
-      for (let i = 0; i < 10; i++) {
-        const older = await fetchOHLCV(tf, {
-          before: bars[0].timestamp, limit: INITIAL_BARS,
-        });
-        if (!older.length) break;
-        bars = older.concat(bars);
-        if (bars[0].timestamp <= cursorTS) break;
-      }
-    }
+    // NOTE: replay cursor coverage across a TF switch is handled by
+    // Replay.onTFChanged, which loads a BOUNDED window centred on the cursor.
+    // We deliberately do NOT page backward from the latest bars here. A cursor
+    // picked on a coarse TF deep in the past (e.g. a 1D bar years back) can be
+    // tens of thousands of fine-TF bars away, so paging would (a) stall on many
+    // sequential fetches — the visible "卡" — and (b) still fall short, after
+    // which onTFChanged used to wrongly drop the cursor as "out of range" and
+    // dump the whole recent series at the new TF. App.currentBars stays the
+    // recent window (what exiting replay returns to); baseBars gets the
+    // cursor-centred window inside onTFChanged.
 
     App.currentBars = bars;
     if (window.Replay && window.Replay.active && window.Replay.onTFChanged) {
       await window.Replay.onTFChanged();
     } else {
       App.chart.applyNewData(bars, bars.length >= INITIAL_BARS);
+      // Overlays restored during boot can hydrate BEFORE bars are ready
+      // (restoreOverlays is async and races this load), leaving every point at
+      // dataIndex 0. Reanchor now that bars exist so each point maps to a real
+      // bar. Critical for fibo_time: its whole projection collapses if the 3
+      // anchors share dataIndex 0 (all lines stack at one x → nothing shows).
+      if (window.Drawing && window.Drawing.reanchorOverlaysWithDataIndex) {
+        window.Drawing.reanchorOverlaysWithDataIndex(bars);
+      }
     }
     if (window.MiniChart && window.MiniChart.refreshData) {
       window.MiniChart.refreshData();
@@ -196,6 +200,72 @@ async function loadTimeframe(tf) {
     console.error(e);
   }
 }
+
+// Show / hide the "回到最新" button (topbar). Visible only while browsing a
+// historical window (an object-tree jump to a drawing outside the recent window).
+function _showGoToLatestBtn(show) {
+  const btn = document.getElementById('btn-goto-latest');
+  if (btn) btn.classList.toggle('hidden', !show);
+}
+
+// Browse to an arbitrary historical timestamp in LIVE (non-replay) mode: load a
+// BOUNDED window around ts (context to the left + a little forward), swap it in,
+// reanchor overlays, and scroll ts into the centre. Used by the object-tree jump
+// so a drawing whose timestamp is outside the recent window (e.g. drawn during a
+// replay of an old period) is viewable without entering replay. Leaves App in a
+// "browsing" state — App.goToLatest() reloads the live tail. Returns true on hit.
+App.browseToTimestamp = async function (ts) {
+  if (!App.chart || !Number.isFinite(ts)) return false;
+  const tf = App.currentTF;
+  const tfMs = (window.Replay && window.Replay.parseTfMs) ? window.Replay.parseTfMs(tf) : 60000;
+  const CONTEXT_BARS = 1500, FORWARD_BARS = 300;
+  try {
+    // `before` fetches the N bars ending just before that ms → a window whose
+    // right edge sits FORWARD_BARS past ts and left edge ~CONTEXT_BARS before it.
+    const bars = await fetchOHLCV(tf, {
+      before: ts + FORWARD_BARS * tfMs, limit: CONTEXT_BARS + FORWARD_BARS,
+    });
+    if (!Array.isArray(bars) || bars.length < 2) return false;
+    App.currentBars = bars;
+    App.browsing = true;
+    App.noMoreData = false;
+    App.chart.applyNewData(bars, true);
+    if (window.Drawing && window.Drawing.reanchorOverlaysWithDataIndex) {
+      window.Drawing.reanchorOverlaysWithDataIndex(bars);
+    }
+    if (window.MiniChart && window.MiniChart.refreshData) window.MiniChart.refreshData();
+    if (window.SimOverlays && window.SimOverlays.sync) window.SimOverlays.sync();
+    // Centre ts in the viewport (scrollToDataIndex right-aligns its arg).
+    let idx = 0; for (let i = 0; i < bars.length; i++) { if (bars[i].timestamp <= ts) idx = i; else break; }
+    const vr = App.chart.getVisibleRange && App.chart.getVisibleRange();
+    const w = vr ? Math.max(10, vr.to - vr.from) : 100;
+    try { App.chart.scrollToDataIndex(Math.round(idx + w / 2), 0); } catch (e) {}
+    // Bring the mini along to the same location (shares the loaded window).
+    if (window.Drawing && window.Drawing._syncMiniToTs) window.Drawing._syncMiniToTs(ts);
+    _showGoToLatestBtn(true);
+    return true;
+  } catch (e) {
+    console.error('[browseToTimestamp]', e);
+    return false;
+  }
+};
+
+// Return from a historical browse to the live tail (latest bars).
+App.goToLatest = async function () {
+  App.browsing = false;
+  _showGoToLatestBtn(false);
+  await loadTimeframe(App.currentTF);   // reloads INITIAL_BARS at the tail
+  // Re-anchor overlays against the latest window (browseToTimestamp anchored
+  // them to the historical window; without this the recent-window drawings
+  // would keep their browse-relative dataIndex and land at the wrong bar).
+  if (window.Drawing && window.Drawing.reanchorOverlaysWithDataIndex) {
+    window.Drawing.reanchorOverlaysWithDataIndex(App.currentBars);
+  }
+  try {
+    const n = (App.currentBars || []).length;
+    if (n && App.chart.scrollToDataIndex) App.chart.scrollToDataIndex(n - 1, 0);
+  } catch (e) {}
+};
 
 // Register lazy-load callback once — fetches older page when user pans left
 // past the earliest loaded bar.
@@ -211,11 +281,16 @@ function initPagination() {
       });
       if (older.length === 0) {
         App.noMoreData = true;
-        App.chart.applyNewData(App.currentBars, false);
+        App.chart.applyMoreData([], false);   // signal "no more" without touching scroll
         return;
       }
       App.currentBars = older.concat(App.currentBars);
-      App.chart.applyNewData(App.currentBars, older.length >= PAGE_BARS);
+      // PREPEND with applyMoreData (NOT applyNewData): applyNewData replaces the
+      // whole dataset and resets the viewport to the latest price, so panning
+      // left to trigger a load would yank the user back to the right edge every
+      // page. applyMoreData splices the older page onto the FRONT and keeps the
+      // visible range pinned to the bars the user is looking at.
+      App.chart.applyMoreData(older, older.length >= PAGE_BARS);
     } catch (e) {
       console.error('[loadMore]', e);
     } finally {
@@ -280,6 +355,10 @@ async function switchSymbol(symbol) {
 
   App.currentSymbol = symbol;
   try { localStorage.setItem('chart_viewer_current_symbol', symbol); } catch (e) {}
+  // Notify indicators (e.g. MicroPivotNWave) that need to re-fetch
+  // symbol-scoped sub-TF data. Fire AFTER currentSymbol is set so
+  // listeners reading App.currentSymbol get the new value.
+  try { window.dispatchEvent(new CustomEvent('app:symbolChanged', { detail: { symbol } })); } catch (e) {}
   // Remember active symbol in the current layout's state so re-opening the
   // app lands on the right instrument.
   if (typeof schedulePersistLayoutState === 'function') schedulePersistLayoutState();
@@ -391,6 +470,14 @@ document.addEventListener('mousedown', (e) => {
 function isTfPopupOpen() {
   return !document.getElementById('tf-popup').classList.contains('hidden');
 }
+
+// Valid TF unit suffixes (per the spec in PROGRESS.md §3 "TF convention"):
+//   m = month / minute (ambiguous by buffer — bare digits + "m" = minutes
+//                       in the popup, but `1m` from the URL/config = month;
+//                       the popup's renderer handles disambiguation)
+//   h = hour, d = day, w = week
+// Map → uppercase display token so the popup buffer renders as "15M", "1H", etc.
+const TF_UNITS = { m: 'M', h: 'H', d: 'D', w: 'W' };
 
 // Extract digit/unit from event — falls back to physical e.code when IME
 // rewrites e.key to "Process" / unidentified chars.
@@ -1767,7 +1854,11 @@ function _initDataActionButtons() {
     openBtn._wired = true;
     openBtn.addEventListener('click', async () => {
       try {
-        await fetch('/api/data_dir/open', { method: 'POST' });
+        const r = await fetch('/api/data_dir/open', { method: 'POST' });
+        // Give feedback — os.startfile often opens Explorer BEHIND the app
+        // window, so without this the click feels like a no-op.
+        if (r.ok) Toast.show(t_('topbar.openedDataFolder'), 'info');
+        else Toast.show(t_('onboarding.errOpenFailed', { err: 'HTTP ' + r.status }), 'error');
       } catch (e) {
         Toast.show(t_('onboarding.errOpenFailed', { err: e }), 'error');
       }
@@ -1797,6 +1888,11 @@ function _initDataActionButtons() {
         Toast.show(t_('onboarding.statusFailed', { err: e }), 'error');
       }
     });
+  }
+  const gotoLatestBtn = document.getElementById('btn-goto-latest');
+  if (gotoLatestBtn && !gotoLatestBtn._wired) {
+    gotoLatestBtn._wired = true;
+    gotoLatestBtn.addEventListener('click', () => { App.goToLatest(); });
   }
 }
 
@@ -1905,6 +2001,35 @@ window.addEventListener('DOMContentLoaded', async () => {
   // shape (init wires DOM once, showSettings → FiboSettings.open()).
   if (window.FiboSettings && window.FiboSettings.init) {
     try { window.FiboSettings.init(); } catch (e) { /* ignore */ }
+  }
+  // Indicator manager. Init wires DOM,
+  // registers known indicator types' KLineChart templates, and restores
+  // active indicators from config.json. Must run AFTER initChart so the
+  // chart instance is available, but BEFORE switchSymbol's first
+  // applyNewData so the indicators' calc() fires on the first dataset.
+  if (window.IndicatorManager && window.IndicatorManager.init) {
+    try { await window.IndicatorManager.init(App.chart); }
+    catch (e) { console.warn('IndicatorManager.init failed', e); }
+  }
+  if (window.IndicatorSettings && window.IndicatorSettings.init) {
+    try { window.IndicatorSettings.init(); } catch (e) { /* ignore */ }
+  }
+  if (window.IndicatorLibrary && window.IndicatorLibrary.init) {
+    try { window.IndicatorLibrary.init(); } catch (e) { /* ignore */ }
+  }
+  // Event log panel (subscribes to BOSChoChDetector + SupplyDemandZones
+  // for narrating structural events during replay).
+  if (window.EventLog && window.EventLog.init) {
+    try { window.EventLog.init(); } catch (e) { /* ignore */ }
+  }
+  // Toolbar 技術指標 button — opens the library dialog.
+  const libBtn = document.getElementById('btn-indicator-library');
+  if (libBtn && !libBtn._wired) {
+    libBtn._wired = true;
+    libBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (window.IndicatorLibrary) window.IndicatorLibrary.open();
+    });
   }
   // Position-tool config — already fetched as part of the i18n boot
   // (above). Run loadPositionConfig as a fallback-only retry path

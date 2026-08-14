@@ -34,3 +34,7 @@ desktop.ini
 .idea/
 *.swp
 *.swo
+
+# Private Wister research material — must NEVER be published
+Wister_MC/
+交易訓練紀錄/

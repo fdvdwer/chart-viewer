@@ -118,6 +118,45 @@
         <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
       </svg>
     </button>
+    <!-- Return to the live tail after a historical browse (object-tree jump to a
+         drawing whose time is outside the recent window loads a bounded window;
+         this button reloads the latest bars). Shown only while browsing. -->
+    <button class="topbar-btn goto-latest hidden" id="btn-goto-latest" data-i18n-title="topbar.gotoLatestTooltip" title="回到最新K棒">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="13 17 18 12 13 7"/>
+        <polyline points="6 17 11 12 6 7"/>
+      </svg>
+      <span data-i18n="topbar.gotoLatest">回到最新</span>
+    </button>
+    <!-- Indicator library (indicator-manager-spec).
+         Opens the add-indicator dialog. Storage-only: search + flat list, NO
+         favourites / community / store. -->
+    <button class="topbar-btn" id="btn-indicator-library" data-i18n-title="topbar.indicatorsTooltip" title="技術指標">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="3 17 9 11 13 15 21 7"/>
+        <polyline points="14 7 21 7 21 14"/>
+      </svg>
+      <span data-i18n="topbar.indicators">技術指標</span>
+    </button>
+    <!-- Event log — chronological feed of BOS / CHoCh / zone-state events.
+         Useful during replay to "narrate" what just happened. Toggles a
+         right-side panel; toolbar button highlights when panel is open. -->
+    <button class="topbar-btn" id="btn-event-log" data-i18n-title="topbar.eventLogTooltip" title="結構事件日誌">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8 6h13M8 12h13M8 18h13"/>
+        <circle cx="4" cy="6" r="1.5"/>
+        <circle cx="4" cy="12" r="1.5"/>
+        <circle cx="4" cy="18" r="1.5"/>
+      </svg>
+      <span data-i18n="topbar.eventLog">事件日誌</span>
+    </button>
+    <button class="topbar-btn" id="btn-cross-degree" title="級別快照（多週期 BOS/CHoCh + 嵌套）">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3l9 5-9 5-9-5 9-5z"/>
+        <path d="M3 13l9 5 9-5"/>
+      </svg>
+      <span>級別</span>
+    </button>
     <button class="topbar-btn" id="btn-layouts" data-i18n-title="topbar.layoutsTooltip" title="版面">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
         <rect x="3" y="3" width="7" height="7"/>
@@ -156,9 +195,9 @@
     </button>
     <!-- branching-replay-spec §5.1: 「⋎ 在此分支」 button. Opens the
          manual-fork modal targeting the current cursor (replay
-         cursor in replay mode, latest bar otherwise). Alt+F enters
+         cursor in replay mode, latest bar otherwise). Alt+B enters
          bar-select mode (click any bar to fork from there). -->
-    <button class="topbar-btn" id="btn-branch-fork" data-i18n-title="topbar.forkHereTooltip" title="在此分支 (Alt+F 選擇 K 棒)">
+    <button class="topbar-btn" id="btn-branch-fork" data-i18n-title="topbar.forkHereTooltip" title="在此分支 (Alt+B 選擇 K 棒)">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
         <path d="M5 4 L12 14 L19 4"/>
         <line x1="12" y1="14" x2="12" y2="20"/>
@@ -220,6 +259,11 @@
           <circle cx="14" cy="14" r="1.5" fill="currentColor"/>
           <circle cx="21" cy="4" r="1.5" fill="currentColor"/>
         </svg>
+        <svg data-icon-for="curve" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M3 18 Q 12 2 21 12"/>
+          <circle cx="3" cy="18" r="1.5" fill="currentColor"/>
+          <circle cx="21" cy="12" r="1.5" fill="currentColor"/>
+        </svg>
       </button>
       <div class="tool-group-popup hidden" data-group="trend">
         <div class="tool-popup-header" data-i18n="tool.group.trend">趨勢線工具</div>
@@ -232,12 +276,21 @@
           <span class="popup-tool-name" data-i18n="tool.trendline">趨勢線</span>
           <span class="popup-tool-hotkey">Alt + T</span>
         </button>
+        <button class="tool-popup-item" data-tool="curve">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M3 18 Q 12 2 21 12"/>
+            <circle cx="3" cy="18" r="1.5" fill="currentColor"/>
+            <circle cx="12" cy="7" r="1.5" fill="currentColor"/>
+            <circle cx="21" cy="12" r="1.5" fill="currentColor"/>
+          </svg>
+          <span class="popup-tool-name" data-i18n="tool.curve">曲線</span>
+        </button>
         <button class="tool-popup-item" data-tool="rectangle">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <rect x="4" y="6" width="16" height="12"/>
           </svg>
           <span class="popup-tool-name" data-i18n="tool.rectangle">矩形</span>
-          <span class="popup-tool-hotkey">Alt + R</span>
+          <span class="popup-tool-hotkey">Alt + R / Alt + G</span>
         </button>
         <button class="tool-popup-item" data-tool="path">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -249,6 +302,14 @@
           </svg>
           <span class="popup-tool-name" data-i18n="tool.path">路徑</span>
           <span class="popup-tool-hotkey">Alt + P</span>
+        </button>
+        <button class="tool-popup-item" data-tool="text">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M5 6 H19"/>
+            <path d="M12 6 V19"/>
+          </svg>
+          <span class="popup-tool-name" data-i18n="tool.text">文字</span>
+          <span class="popup-tool-hotkey">Alt + X</span>
         </button>
       </div>
     </div>
@@ -269,6 +330,12 @@
           <line x1="14" y1="10" x2="21" y2="10" stroke-opacity="0.7"/>
           <line x1="14" y1="14" x2="21" y2="14"/>
           <line x1="14" y1="18" x2="21" y2="18" stroke-opacity="0.7"/>
+        </svg>
+        <svg data-icon-for="fibo-time" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+          <polyline points="3 18 9 8 13 13" stroke-dasharray="2 2"/>
+          <line x1="13" y1="3" x2="13" y2="21"/>
+          <line x1="17" y1="3" x2="17" y2="21" stroke-opacity="0.7"/>
+          <line x1="21" y1="3" x2="21" y2="21" stroke-opacity="0.55"/>
         </svg>
       </button>
       <div class="tool-group-popup hidden" data-group="fibonacci">
@@ -294,6 +361,16 @@
           </svg>
           <span class="popup-tool-name" data-i18n="tool.fiboExtension">斐波那契趨勢擴展</span>
           <span class="popup-tool-hotkey">Alt + E</span>
+        </button>
+        <button class="tool-popup-item" data-tool="fibo-time">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+            <polyline points="3 18 9 8 13 13" stroke-dasharray="2 2"/>
+            <line x1="13" y1="3" x2="13" y2="21"/>
+            <line x1="17" y1="3" x2="17" y2="21" stroke-opacity="0.7"/>
+            <line x1="21" y1="3" x2="21" y2="21" stroke-opacity="0.55"/>
+          </svg>
+          <span class="popup-tool-name" data-i18n="tool.fiboTime">斐波那契時間</span>
+          <span class="popup-tool-hotkey">Alt + I</span>
         </button>
       </div>
     </div>
@@ -496,7 +573,7 @@
 
     <!-- Bar-select mode preview (§3.2.2): faint ⋎ ghost that follows
          the mouse, snapped to the nearest bar. Visible only while
-         BranchController is in bar-select mode (Alt+F). -->
+         BranchController is in bar-select mode (Alt+B). -->
     <div id="branch-bar-select-preview" class="branch-bar-select-preview" hidden></div>
 
     <!-- ========== Bracket tickets (spec: bracket-ux-polish §2) ==========
@@ -598,6 +675,11 @@
         <div class="sim-row" data-sim-field="qty">
           <label data-i18n="sim.fieldQty">單位</label>
           <input type="number" id="sim-qty" min="0.01" step="1" value="1">
+          <!-- sim-multi-tp-feature: per-user qty increment. The number
+               field steps by this; persisted in localStorage so the panel
+               remembers the trader's preferred lot unit across sessions. -->
+          <input type="number" id="sim-qty-step" class="sim-qty-step"
+                 min="0.01" step="0.01" title="每次增減的單位" data-i18n-title="sim.qtyStepTitle">
         </div>
         <div class="sim-row hidden" data-sim-field="price">
           <!-- Label flips between 限價 / 觸發價格 / 限價 (for stop-limit)
@@ -658,6 +740,25 @@
         <div class="sim-info-row"><span data-i18n="sim.openedAt">進場時間</span><span id="sim-pos-opened">—</span></div>
       </div>
 
+      <!-- ===== Multi-segment exit levels (sim-multi-tp-feature) =====
+           Structured "exit levels" list — TradingView-style. Renders one
+           editable row per COMMITTED bracket child (limit=TP / stop=SL);
+           qty + price are number fields, 🗑 removes the leg, ＋ adds a
+           reduce-only leg. Populated by sim_panel._renderExitLevels; the
+           chart lines stay draggable for price. Any edit here converts the
+           bracket to the engine's reduce-only group (OCO stripped). -->
+      <section class="sim-exit-levels" id="sim-exit-levels" hidden>
+        <div class="sim-exit-head">
+          <span class="sim-exit-title" data-i18n="sim.exitLevels">出場層級</span>
+          <span class="sim-exit-coverage" id="sim-exit-coverage"></span>
+        </div>
+        <div class="sim-exit-rows" id="sim-exit-rows"></div>
+        <div class="sim-exit-addbar">
+          <button class="sim-exit-add tp" id="sim-exit-add-tp" data-i18n="sim.exitAddTp">＋ 停利</button>
+          <button class="sim-exit-add sl" id="sim-exit-add-sl" data-i18n="sim.exitAddSl">＋ 停損</button>
+        </div>
+      </section>
+
       <!-- Proposal-phase 確認/捨棄 buttons live inside the chart-side
            entry ticket now (tp-sl-drop-spec §6); side-panel side just
            keeps the manual market-exit button. -->
@@ -696,20 +797,126 @@
       <!-- Populated dynamically: real / exploration / hindsight / contamination -->
     </footer>
   </aside>
+
+  <!-- ===== Event Log panel ===== -->
+  <!-- Right-side chronological feed of structural events. Subscribes to
+       BOS/CHoCh + Supply/Demand zone state and appends entries as the
+       replay cursor moves forward. Useful for "narration" — at-a-glance
+       chronological understanding of what just happened during replay. -->
+  <aside id="event-log-panel" class="hidden">
+    <header>
+      <span class="title" data-i18n="eventLog.title">結構事件日誌</span>
+      <span class="spacer"></span>
+      <button class="event-log-clear" data-i18n-title="eventLog.clearTooltip" title="清空">🗑</button>
+      <button class="event-log-close close-btn" data-i18n-title="common.close" title="關閉">✕</button>
+    </header>
+    <div class="event-log-filter">
+      <label><input type="checkbox" data-filter="bos"   checked> <span data-i18n="eventLog.filterBos">BOS</span></label>
+      <label><input type="checkbox" data-filter="choch" checked> <span data-i18n="eventLog.filterChoch">CHoCh</span></label>
+      <label><input type="checkbox" data-filter="zone"  checked> <span data-i18n="eventLog.filterZone">Zone</span></label>
+    </div>
+    <div class="event-log-body" role="log">
+      <!-- Populated by event_log.js — one .event-log-row per entry,
+           sorted chronologically (oldest at top, newest at bottom). -->
+    </div>
+  </aside>
+
+  <aside id="cross-degree-panel" class="hidden">
+    <header>
+      <span class="title">級別快照</span>
+      <span class="spacer"></span>
+      <button class="cd-refresh" title="重新整理（在當前 cursor 重算）">⟳</button>
+      <button class="cd-close close-btn" title="關閉">✕</button>
+    </header>
+    <div class="cd-toolbar">
+      <label><input type="checkbox" id="cd-overlay-toggle"> 在圖上疊更大級別結構</label>
+    </div>
+    <div class="cd-body" role="log">
+      <!-- Populated by cross_degree_panel.js -->
+    </div>
+  </aside>
+
 </main>
 
 <!-- ========== Replay control bar (hidden by default) ========== -->
 <div id="replay-bar" class="hidden">
-  <button class="replay-btn" id="rep-pick" data-i18n-title="replay.pickBarTooltip" title="選擇K線">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <!-- K-bar on the left + arrow pointing at it -->
-      <line x1="5" y1="4" x2="5" y2="20"/>
-      <rect x="3" y="9" width="4" height="7" fill="currentColor" stroke="none"/>
-      <polyline points="13 16 10 12 13 8"/>
-      <line x1="20" y1="12" x2="10" y2="12"/>
-    </svg>
-    <span data-i18n="replay.pickBar">選擇K線</span>
-  </button>
+  <!-- Start-point picker: split button (main runs the selected mode) + caret
+       (opens the mode menu). The trigger icon + label reflect the chosen mode. -->
+  <div class="rep-pick-group" id="rep-pick-group">
+    <button class="replay-btn rep-pick-main" id="rep-pick-main">
+      <span class="rpk-ic" data-mode-icon="pick">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="5" y1="4" x2="5" y2="20"/>
+          <rect x="3" y="9" width="4" height="7" fill="currentColor" stroke="none"/>
+          <polyline points="13 16 10 12 13 8"/>
+          <line x1="20" y1="12" x2="10" y2="12"/>
+        </svg>
+      </span>
+      <span class="rpk-ic hidden" data-mode-icon="random">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="3"/>
+          <circle cx="8.5" cy="8.5" r="1.3" fill="currentColor" stroke="none"/>
+          <circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/>
+          <circle cx="15.5" cy="15.5" r="1.3" fill="currentColor" stroke="none"/>
+        </svg>
+      </span>
+      <span class="rpk-ic hidden" data-mode-icon="date">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="4" width="18" height="17" rx="2"/>
+          <line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/>
+        </svg>
+      </span>
+      <span class="rpk-ic hidden" data-mode-icon="earliest">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="5" y1="21" x2="5" y2="3"/><path d="M5 4 L17 4 L14 8 L17 12 L5 12" fill="currentColor" stroke="none"/>
+        </svg>
+      </span>
+      <span id="rep-pick-label" data-i18n="replay.pickBar">選擇K線</span>
+    </button>
+    <button class="replay-btn rep-pick-caret" id="rep-pick-caret" data-i18n-title="replay.startMenuTitle" title="選擇起點">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 15 12 9 18 15"/></svg>
+    </button>
+    <div class="rep-pick-menu hidden" id="rep-pick-menu">
+      <div class="rpk-menu-title" data-i18n="replay.startMenuTitle">選擇起點</div>
+      <button class="rpk-item" data-mode="pick">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="5" y1="4" x2="5" y2="20"/>
+          <rect x="3" y="9" width="4" height="7" fill="currentColor" stroke="none"/>
+          <polyline points="13 16 10 12 13 8"/>
+          <line x1="20" y1="12" x2="10" y2="12"/>
+        </svg>
+        <span data-i18n="replay.menuItemBar">K線</span>
+      </button>
+      <button class="rpk-item" data-mode="date">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="4" width="18" height="17" rx="2"/>
+          <line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/>
+        </svg>
+        <span data-i18n="replay.menuItemDate">日期…</span>
+      </button>
+      <button class="rpk-item" data-mode="earliest">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="5" y1="21" x2="5" y2="3"/><path d="M5 4 L17 4 L14 8 L17 12 L5 12" fill="currentColor" stroke="none"/>
+        </svg>
+        <span data-i18n="replay.menuItemEarliest">最早可用日期</span>
+      </button>
+      <button class="rpk-item" data-mode="random">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="3"/>
+          <circle cx="8.5" cy="8.5" r="1.3" fill="currentColor" stroke="none"/>
+          <circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/>
+          <circle cx="15.5" cy="15.5" r="1.3" fill="currentColor" stroke="none"/>
+        </svg>
+        <span data-i18n="replay.randomBar">隨機K線</span>
+      </button>
+      <button class="rpk-item" data-mode="latest">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="19" y1="21" x2="19" y2="3"/><path d="M19 4 L7 4 L10 8 L7 12 L19 12" fill="currentColor" stroke="none"/>
+        </svg>
+        <span data-i18n="replay.menuItemLatest">最新K棒</span>
+      </button>
+    </div>
+  </div>
   <button class="replay-btn" id="rep-play" data-i18n-title="replay.playPauseTooltip" title="播放/暫停 (Space)">
     <svg id="rep-play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
       <polygon points="5 3 19 12 5 21 5 3"/>
@@ -750,6 +957,38 @@
   <button class="replay-btn close" id="rep-exit" data-i18n-title="replay.exit" title="關閉重播">✕</button>
 </div>
 
+<!-- ========== Replay date picker (TradingView-style, hidden by default) ====== -->
+<div id="rep-date-modal" class="hidden">
+  <div class="rdp-card">
+    <header>
+      <span class="rdp-title-txt" data-i18n="replay.datePickTitle">選擇日期</span>
+      <button class="rdp-close close-btn" id="rdp-close">✕</button>
+    </header>
+    <div class="rdp-inputs">
+      <div class="rdp-input-wrap">
+        <input type="text" class="rdp-field" id="rdp-date-field" readonly>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="17" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>
+      </div>
+      <div class="rdp-input-wrap">
+        <input type="text" class="rdp-field" id="rdp-time-field" readonly value="00:00">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 16 14"/></svg>
+        <div class="rdp-time-menu hidden" id="rdp-time-menu"></div>
+      </div>
+    </div>
+    <div class="rdp-nav">
+      <button class="rdp-arrow" id="rdp-prev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg></button>
+      <button class="rdp-head" id="rdp-head">—</button>
+      <button class="rdp-arrow" id="rdp-next"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg></button>
+    </div>
+    <div class="rdp-grid" id="rdp-grid"></div>
+    <button class="rdp-first" id="rdp-first" data-i18n="replay.dateFirstAvail">選擇第一個可用日期</button>
+    <footer>
+      <button class="rdp-cancel" id="rdp-cancel" data-i18n="replay.dateCancel">取消</button>
+      <button class="rdp-ok" id="rdp-ok" data-i18n="replay.dateConfirm">選擇</button>
+    </footer>
+  </div>
+</div>
+
 <!-- (sim-panel moved into #main as a flex sibling of #chart-area so it
      takes its own column instead of overlaying the price axis) -->
 
@@ -770,6 +1009,13 @@
   <div class="tf-popup-title"><span data-i18n="dlg.tfPopupTitle">變更週期</span> <span class="tf-info">ⓘ</span></div>
   <div class="tf-popup-input" id="tf-popup-input"></div>
   <div class="tf-popup-sub" id="tf-popup-sub"></div>
+</div>
+
+<!-- ========== Position R:R input popup (mirrors tf-popup) ========== -->
+<div id="rr-popup" class="hidden">
+  <div class="tf-popup-title"><span id="rr-popup-title" data-i18n="dlg.rrPopupTitleTarget">依停損設定目標</span> <span class="tf-info">ⓘ</span></div>
+  <div class="tf-popup-input" id="rr-popup-input"></div>
+  <div class="tf-popup-sub" id="rr-popup-sub"></div>
 </div>
 
 <!-- ========== Replay save/restore dialog (hidden by default) ========== -->
@@ -848,6 +1094,8 @@
     <span data-i18n="ctx.remove">移除</span><span class="hint">Del</span>
   </div>
   <div class="ctx-sep"></div>
+  <div class="ctx-item position-only" data-act="set-target-rr" data-i18n="ctx.setTargetRR">依停損設定目標…</div>
+  <div class="ctx-item position-only" data-act="set-stop-rr" data-i18n="ctx.setStopRR">依目標設定停損…</div>
   <div class="ctx-item path-only" data-act="continue-path" data-i18n="ctx.continuePath">繼續連接</div>
   <div class="ctx-item" data-act="settings" data-i18n="ctx.settings">設定…</div>
 </div>
@@ -933,7 +1181,7 @@
         <!-- List view: all known symbols + their current spec status. -->
         <div class="symspec-view symspec-list" data-symspec-view="list">
           <p class="symspec-hint" data-i18n="panel.symspec.listHint">
-            點選商品 → 編輯跳動量、每點金額、計價貨幣等。
+            點選商品 → 編輯跳動量、每點金額、計價貨幣等。資料夾中尚無預設的商品會落到 NQ 預設值,P&L 將不正確 — 請設定。
           </p>
           <div class="symspec-table-wrap">
             <table class="symspec-table">
@@ -958,7 +1206,7 @@
                   data-i18n="panel.symspec.btnBack">← 返回列表</button>
           <h3 class="symspec-edit-title" id="symspec-edit-title">—</h3>
           <p class="symspec-history-warn" data-i18n="panel.symspec.warnHistoryNote">
-            ⚠ 修改後僅影響「之後」的新交易。
+            ⚠ 修改後僅影響「之後」的新交易;已關閉的歷史交易 P&L 不會重算。
           </p>
           <div class="symspec-form" id="symspec-form">
             <div class="symspec-row">
@@ -1007,7 +1255,7 @@
               </select>
             </div>
             <p class="symspec-hint symspec-hint-currency" data-i18n="panel.symspec.hintCurrency">
-              此貨幣只影響 P&L 顯示格式。
+              此貨幣只影響 P&L 顯示格式;pointValue / 手續費的數字本身就以該貨幣為單位
             </p>
           </div>
           <div class="symspec-edit-actions">
@@ -1105,6 +1353,21 @@
         <button class="ls-btn" data-style="dotted"><span class="ls-preview dotted"></span></button>
       </div>
     </div>
+    <!-- Curve-only: end arrowheads + straight tangent extensions -->
+    <div class="row hidden" id="sp-row-curve-arrow">
+      <label data-i18n="panel.drawing.arrow">箭頭</label>
+      <div class="line-style-group">
+        <button class="sp-toggle-btn" id="sp-curve-arrow-left" data-i18n-title="panel.drawing.arrowLeft" title="左端箭頭">←▪</button>
+        <button class="sp-toggle-btn" id="sp-curve-arrow-right" data-i18n-title="panel.drawing.arrowRight" title="右端箭頭">▪→</button>
+      </div>
+    </div>
+    <div class="row hidden" id="sp-row-curve-extend">
+      <label data-i18n="panel.drawing.extend">延伸</label>
+      <div class="line-style-group">
+        <button class="sp-toggle-btn" id="sp-curve-extend-left" data-i18n-title="panel.drawing.extendLeft" title="延伸左邊線條">⇐</button>
+        <button class="sp-toggle-btn" id="sp-curve-extend-right" data-i18n-title="panel.drawing.extendRight" title="延伸右邊線條">⇒</button>
+      </div>
+    </div>
 
   </section>
 
@@ -1139,6 +1402,19 @@
         <option value="center" selected data-i18n="panel.drawing.alignCenter">中心</option>
         <option value="right" data-i18n="panel.drawing.alignRight">右</option>
       </select>
+    </div>
+    <!-- Text-box only: background / border / word-wrap. Hidden for rect/
+         trendline/measure labels (which have their own bg/border on 樣式). -->
+    <div class="row sp-textbox-only">
+      <label><input type="checkbox" id="sp-textbox-bg-enabled"> <span data-i18n="panel.drawing.background">背景</span></label>
+      <button class="color-swatch" data-target="textbox-bg" data-i18n-title="panel.drawing.background" title="背景顏色"></button>
+    </div>
+    <div class="row sp-textbox-only">
+      <label><input type="checkbox" id="sp-textbox-border-enabled"> <span data-i18n="panel.drawing.borderToggle">框線</span></label>
+      <button class="color-swatch" data-target="textbox-border" data-i18n-title="panel.drawing.borderToggle" title="框線顏色"></button>
+    </div>
+    <div class="row sp-textbox-only">
+      <label><input type="checkbox" id="sp-textbox-wrap"> <span data-i18n="panel.drawing.textWrap">自動換行</span></label>
     </div>
   </section>
 
@@ -1402,6 +1678,83 @@
      levels, alpha slider, reverse, single-color override, etc.) to
      share controls — drives its own popover via window.FiboSettings.
      Levels grid is populated dynamically at open() time. -->
+
+<!-- ========== Indicator Library (indicator-manager-spec §5) ==========
+     Storage-only "add indicator" dialog. Triggered by the 技術指標
+     topbar button. Search box + flat list — NO favourites / community /
+     store / likes / author column (user explicitly rejected those). -->
+<div id="indicator-library" class="settings-popover hidden" role="dialog" aria-hidden="true">
+  <header>
+    <span class="title" data-i18n="panel.indicators.libraryTitle">技術指標</span>
+    <button class="close-btn" id="ind-lib-close" type="button">✕</button>
+  </header>
+  <div class="ind-lib-search-row">
+    <input id="ind-lib-search" type="text" class="ind-lib-search"
+           data-i18n-placeholder="panel.indicators.searchPlaceholder"
+           placeholder="搜尋指標…">
+  </div>
+  <div id="ind-lib-list" class="ind-lib-list"></div>
+</div>
+
+<!-- ========== Indicator Settings dialog (indicator-manager-spec §3) ==========
+     Reusable schema-driven dialog. Each indicator type declares its own
+     paramSchema; IndicatorSettings walks the schema and generates inputs. -->
+<div id="indicator-settings" class="settings-popover hidden" role="dialog" aria-hidden="true">
+  <header>
+    <span class="title" id="ind-settings-title">指標設定</span>
+    <button class="close-btn" id="ind-settings-close" type="button">✕</button>
+  </header>
+  <div id="ind-settings-body" class="ind-settings-body"></div>
+  <div class="ind-settings-footer">
+    <button type="button" id="ind-settings-tpl-btn" class="tpl-btn">
+      <span data-i18n="panel.settings.template">範本</span>
+      <span class="chevron">▾</span>
+    </button>
+    <div class="ind-settings-actions">
+      <button type="button" id="ind-settings-cancel" data-i18n="common.cancel">取消</button>
+      <button type="button" id="ind-settings-ok" class="btn-primary" data-i18n="common.confirm">確認</button>
+    </div>
+  </div>
+</div>
+
+<!-- Indicator template popover. Sibling of #indicator-settings so its
+     z-index can sit above the settings dialog without nested-stacking
+     issues. Same shape as #sp-template-pop (drawing template popover). -->
+<div id="ind-settings-tpl-pop" class="tpl-popover hidden">
+  <div class="tpl-item tpl-action" data-act="save-as"
+       data-i18n="panel.drawing.tplSaveAs">另存為...</div>
+  <div class="tpl-item tpl-action" data-act="apply-defaults"
+       data-i18n="common.defaults">套用預設值</div>
+  <div id="ind-settings-tpl-list"></div>
+</div>
+
+<!-- Indicator template-name input modal — mirrors the rectangle's
+     `#tpl-save-modal` structure (.tpl-modal-content / .tpl-label /
+     .tpl-name-row + chevron / .tpl-name-existing list) so the visual
+     style stays identical. Separate ID + element so the OK / Cancel
+     handlers don't fight drawing.js's wiring on the same DOM nodes. -->
+<div id="ind-tpl-name-modal" class="hidden">
+  <div class="tpl-modal-backdrop"></div>
+  <div class="tpl-modal-content">
+    <header>
+      <span class="title" data-i18n="panel.drawing.tplSaveTitle">儲存繪圖模板</span>
+      <button class="close-btn" id="ind-tpl-name-close" type="button">✕</button>
+    </header>
+    <label class="tpl-label" data-i18n="panel.drawing.tplNameLabel">新模板名稱</label>
+    <div class="tpl-name-row">
+      <input type="text" id="ind-tpl-name-input" autocomplete="off" placeholder="">
+      <button class="tpl-name-chevron" id="ind-tpl-name-dropdown-btn" type="button"
+              data-i18n-title="panel.drawing.tplExisting" title="已存在的名稱">▾</button>
+    </div>
+    <div class="tpl-name-existing hidden" id="ind-tpl-name-existing"></div>
+    <div class="tpl-modal-actions">
+      <button type="button" id="ind-tpl-name-cancel" data-i18n="common.cancel">取消</button>
+      <button type="button" id="ind-tpl-name-confirm" class="primary"
+              data-i18n="common.save" disabled>儲存</button>
+    </div>
+  </div>
+</div>
+
 <div id="fibo-overlay-settings" class="settings-popover hidden" role="dialog" aria-hidden="true">
   <header>
     <!-- Title set programmatically by drawing.js — 斐波那契回撤 for retrace,
@@ -1553,6 +1906,25 @@
 <script src="mini_chart.js"></script>
 <script src="sim_history.js"></script>
 <script src="symbol_settings.js"></script>
+<!-- Indicator manager + library + settings dialog.
+     Order matters: indicators/ modules register themselves on
+     window.SwingPivotIndicator (etc.); indicator_manager.js consumes
+     the registry, indicator_library.js + indicator_settings.js are
+     called BY the manager. All initialised in app.js boot order. -->
+<script src="indicators/swing_pivot.js"></script>
+<script src="indicators/n_wave.js"></script>
+<script src="indicators/micro_pivot_nwave.js"></script>
+<script src="indicators/bos_choch.js"></script>
+<script src="indicators/supply_demand_zones.js"></script>
+<script src="indicators/span_structure.js"></script>
+<script src="indicators/break_marker.js"></script>
+<script src="cross_degree.js"></script>
+<script src="cross_degree_overlay.js"></script>
+<script src="cross_degree_panel.js"></script>
+<script src="event_log.js"></script>
+<script src="indicator_settings.js"></script>
+<script src="indicator_library.js"></script>
+<script src="indicator_manager.js"></script>
 <script src="app.js"></script>
 
 <!-- ========== Trade history drawer (sim_history.js) ==========

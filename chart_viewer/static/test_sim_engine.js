@@ -494,6 +494,70 @@ function freshEngine(accountSize) {
 }
 
 // =================================================================
+// 17. Multi-segment reduce-only bracket — TP1 closes 1 lot, SL clamps to
+//     the runner, TP2 keeps guarding; then TP2 closes the runner.
+// =================================================================
+{
+  const e = freshEngine();
+  const { slIds, tpIds } = e.placeBracket({
+    entry: { side: 'buy', type: 'market', qty: 2 },
+    takeProfits: [{ price: 26550, qty: 1 }, { price: 26600, qty: 1 }],
+    stopLosses:  [{ price: 26480, qty: 2 }],
+  });
+  e.processBar(bar(26500, 26505, 26495, 26500));   // entry: 2 lots @ 26500.125
+  check('17.entry.qty.2', e.getPositions()[0].qty === 2);
+
+  // Bar reaches TP1 (26550) but not TP2 (26600) and not SL (26480).
+  e.processBar(bar(26505, 26550, 26505, 26545));
+  const pos = e.getPositions()[0];
+  check('17.tp1.closed.one.lot', pos && pos.qty === 1, `qty=${pos && pos.qty}`);
+  check('17.sl.clamped.to.runner',
+    e.getOrder(slIds[0]).qty === 1 && e.getOrder(slIds[0]).status === 'pending',
+    `slQty=${e.getOrder(slIds[0]).qty}`);
+  check('17.tp2.still.pending.qty1',
+    e.getOrder(tpIds[1]).qty === 1 && e.getOrder(tpIds[1]).status === 'pending');
+
+  // Bar reaches TP2 (26600) → closes the runner, SL cancelled.
+  e.processBar(bar(26550, 26600, 26550, 26595));
+  check('17.tp2.closes.runner', e.getPositions().length === 0);
+  check('17.sl.cancelled.after.full.close',
+    e.getOrder(slIds[0]).status === 'cancelled');
+  const closed = e.getPositionHistory()[0];
+  // realised = (26550-26500.125)*1*20 + (26600-26500.125)*1*20
+  check('17.realised.both.tp.legs',
+    approxEq(closed.realisedPnL, (26550 - 26500.125) * 20 + (26600 - 26500.125) * 20, 1e-6),
+    `realised=${closed.realisedPnL}`);
+}
+
+// =================================================================
+// 18. Multi-TP then SL on the runner — the clamped SL closes only the
+//     remaining 1 lot (no over-close / no phantom flip), TP2 cancelled.
+// =================================================================
+{
+  const e = freshEngine();
+  const { tpIds } = e.placeBracket({
+    entry: { side: 'buy', type: 'market', qty: 2 },
+    takeProfits: [{ price: 26550, qty: 1 }, { price: 26600, qty: 1 }],
+    stopLosses:  [{ price: 26480, qty: 2 }],
+  });
+  e.processBar(bar(26500, 26505, 26495, 26500));       // entry 2 lots
+  e.processBar(bar(26505, 26550, 26505, 26545));       // TP1 → runner=1, SL clamps to 1
+  check('18.after.tp1.qty.1', e.getPositions()[0].qty === 1);
+
+  e.processBar(bar(26505, 26510, 26480, 26485));       // SL hit
+  check('18.no.open.position', e.getPositions().length === 0);
+  check('18.no.phantom.flip.short', e.getPositions().every(p => p.side !== 'short'));
+  check('18.tp2.cancelled', e.getOrder(tpIds[1]).status === 'cancelled');
+  const closed = e.getPositionHistory()[0];
+  check('18.closed.qty.reflects.2.entered', closed.entryQty === 2);
+  // realised = TP1 leg + SL leg (each 1 lot). SL fill = 26480 + sell slip(-0.25)=26479.75
+  check('18.realised.tp1.plus.sl',
+    approxEq(closed.realisedPnL,
+      (26550 - 26500.125) * 20 + (26479.75 - 26500.125) * 20, 1e-6),
+    `realised=${closed.realisedPnL}`);
+}
+
+// =================================================================
 // Done.
 // =================================================================
 console.log(`\n=== ${pass} passed, ${fail} failed ===`);

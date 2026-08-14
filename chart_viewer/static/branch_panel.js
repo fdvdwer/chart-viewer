@@ -96,7 +96,7 @@
 
       // ---- Phase 2 wiring ---------------------------------------------
       // Toolbar 「⋎ 在此分支」 fork button + chart-side markers + bar-select
-      // mode (Alt+F) + branch pill. Each piece is self-contained; missing
+      // mode (Alt+B) + branch pill. Each piece is self-contained; missing
       // DOM elements are tolerated (no-op).
       this._initForkButton();
       this._initBranchPill();
@@ -525,12 +525,13 @@
     },
 
     _initHotkeys() {
-      // Alt+F enters bar-select mode (§3.2.2). ESC exits when active.
+      // Alt+B enters bar-select mode (§3.2.2). ESC exits when active.
+      // (Alt+F is the fibo-retracement drawing tool — keep them distinct.)
       // Don't hijack keys while typing in inputs / textareas.
       document.addEventListener('keydown', (e) => {
         const tag = (e.target && e.target.tagName) || '';
         const inForm = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT');
-        if (e.altKey && (e.key === 'f' || e.key === 'F') && !inForm) {
+        if (e.altKey && (e.key === 'b' || e.key === 'B') && !inForm) {
           e.preventDefault();
           this._toggleBarSelectMode();
           return;

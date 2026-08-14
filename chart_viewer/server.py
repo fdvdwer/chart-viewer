@@ -78,6 +78,17 @@ DEFAULT_CONFIG = {
     # Persisted via /api/config; partial-merge logic in
     # _validate_config_payload preserves untouched fields on each POST.
     'uiLang': 'en',
+    # Indicator manager state (indicator-manager-spec §5.3).
+    #   legend_collapsed — whether the top-left chart legend is in the
+    #     compact `⌄ N` collapsed form vs expanded per-indicator rows.
+    #   active — list of indicators currently on the chart, with their
+    #     type, instance id, visibility, and per-instance params. The
+    #     frontend re-instantiates each on chart load (no recompute
+    #     latency for the user past the first calc).
+    'indicators': {
+        'legend_collapsed': False,
+        'active': [],
+    },
 }
 # Legacy (pre-layouts) locations — kept for one-time migration.
 LEGACY_DRAWINGS_DIR = os.path.join(USER_DATA_DIR, 'drawings')
@@ -652,6 +663,40 @@ def _validate_config_payload(body) -> dict:
         v = body.get('uiLang')
         if v in ('zh', 'en'):
             out['uiLang'] = v
+    # indicator-manager-spec §5.3 — indicator manager state. Replace the
+    # whole block atomically rather than diffing, since the active list
+    # is fully managed by the frontend (add / remove / reorder happen
+    # there). Validate each entry; silently drop malformed ones rather
+    # than hard-fail the whole save (same policy as uiLang above).
+    if 'indicators' in body:
+        raw = body.get('indicators') or {}
+        if isinstance(raw, dict):
+            block: dict = {
+                'legend_collapsed': bool(raw.get('legend_collapsed', False)),
+                'active': [],
+            }
+            raw_active = raw.get('active')
+            if isinstance(raw_active, list):
+                for item in raw_active:
+                    if not isinstance(item, dict):
+                        continue
+                    itype = item.get('type')
+                    iid = item.get('id')
+                    if not isinstance(itype, str) or not isinstance(iid, str):
+                        continue
+                    # Length cap on type/id strings (defensive).
+                    if not (1 <= len(itype) <= 64) or not (1 <= len(iid) <= 128):
+                        continue
+                    params = item.get('params')
+                    if not isinstance(params, dict):
+                        params = {}
+                    block['active'].append({
+                        'type':    itype,
+                        'id':      iid,
+                        'visible': bool(item.get('visible', True)),
+                        'params':  params,
+                    })
+            out['indicators'] = block
     return out
 
 

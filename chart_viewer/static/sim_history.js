@@ -100,11 +100,31 @@
         tbody.addEventListener('click', (e) => {
           const btn = e.target && e.target.closest
             ? e.target.closest('.sim-history-row-delete') : null;
-          if (!btn) return;
-          e.stopPropagation();
-          const posId = parseInt(btn.dataset.posId, 10);
-          if (!Number.isFinite(posId)) return;
-          this._onRowDelete(posId);
+          if (btn) {
+            e.stopPropagation();
+            const posId = parseInt(btn.dataset.posId, 10);
+            if (!Number.isFinite(posId)) return;
+            this._onRowDelete(posId);
+            return;
+          }
+          // Expand / collapse a scale-out trade's per-leg exit detail.
+          const row = e.target && e.target.closest
+            ? e.target.closest('tr.sim-history-trade.has-exits') : null;
+          if (!row) return;
+          const idx = row.dataset.tradeIdx;
+          const posId = parseInt(row.dataset.posId, 10);
+          const detail = tbody.querySelector(
+            `tr.sim-history-exit-detail[data-detail-idx="${idx}"]`);
+          const willExpand = detail ? detail.hidden : true;
+          if (!this._expandedTrades) this._expandedTrades = new Set();
+          if (Number.isFinite(posId)) {
+            if (willExpand) this._expandedTrades.add(posId);
+            else this._expandedTrades.delete(posId);
+          }
+          if (detail) {
+            detail.hidden = !willExpand;
+            row.classList.toggle('expanded', willExpand);
+          }
         });
       }
 
@@ -340,6 +360,31 @@
       }
     },
 
+    /** Collect a closed trade's exit fills — one entry per exit order in
+     *  `pos.exitOrderIds` (each partial TP/SL close records its own order
+     *  with fillPrice + filledAtBarTs + qty). Returns the per-leg list, the
+     *  qty-weighted average exit price, and the final exit timestamp. Used
+     *  by both the on-screen row (weighted summary + expandable detail) and
+     *  the CSV export (one row per leg). */
+    _exitLegsInfo(pos, eng) {
+      const out = { legs: [], avgPrice: null, lastTs: null, count: 0 };
+      if (!pos || !pos.exitOrderIds || !eng || !eng.getOrder) return out;
+      let wsum = 0, qsum = 0;
+      for (const id of pos.exitOrderIds) {
+        const o = eng.getOrder(id);
+        if (!o || !Number.isFinite(o.fillPrice)) continue;
+        out.legs.push({
+          order: o, price: o.fillPrice, ts: o.filledAtBarTs,
+          qty: o.qty, typeLabel: orderTypeLabel(o, 'exit', pos),
+        });
+        wsum += o.fillPrice * o.qty; qsum += o.qty;
+        out.lastTs = o.filledAtBarTs;
+      }
+      out.count = out.legs.length;
+      out.avgPrice = qsum > 0 ? wsum / qsum : null;
+      return out;
+    },
+
     /** Build one trade as a single <tr> with two stacked <div>s per
      *  cell (出場 on top, 進場 on bottom). This lays out cleanly without
      *  rowspan tricks — every cell shares the same row height, so all
@@ -367,16 +412,20 @@
 
       // Exit info (if closed). Open positions render the "Open / 持倉中"
       // placeholder on the exit line.
+      // Exit summary is the qty-WEIGHTED AVERAGE across every partial
+      // fill (was: only the last leg — wrong price + wrong % for a
+      // scale-out). The per-leg breakdown is rendered as an expandable
+      // detail row below when there is more than one exit.
       const isClosed = pos.closedAtBarTs != null;
+      const exitInfo = this._exitLegsInfo(pos, eng);
       let exitTs = null, exitPrice = null, exitTypeLabel = '—';
-      if (isClosed && pos.exitOrderIds && pos.exitOrderIds.length) {
-        const exitOrderId = pos.exitOrderIds[pos.exitOrderIds.length - 1];
-        const exitOrder = eng && eng.getOrder ? eng.getOrder(exitOrderId) : null;
-        if (exitOrder) {
-          exitTs = exitOrder.filledAtBarTs;
-          exitPrice = exitOrder.fillPrice;
-          exitTypeLabel = orderTypeLabel(exitOrder, 'exit', pos);
-        }
+      if (isClosed && exitInfo.count) {
+        exitTs = exitInfo.lastTs;
+        exitPrice = exitInfo.avgPrice;
+        const lastLeg = exitInfo.legs[exitInfo.legs.length - 1];
+        exitTypeLabel = exitInfo.count > 1
+          ? t_('history.splitExits').replace('{n}', exitInfo.count)
+          : (lastLeg ? lastLeg.typeLabel : '—');
       }
 
       // Notional, % change, MFE/MAE/cumulative percentages.
@@ -442,15 +491,44 @@
       const exitTypeStr  = isClosed ? exitTypeLabel : '—';
       const exitPriceStr = isClosed ? `${fmtPx(exitPrice)}` : '—';
 
+      // Scale-out trades (>1 exit fill) get an expandable per-leg detail
+      // row and a ▸ chevron. Click toggles it (delegated on tbody).
+      const hasExits = isClosed && exitInfo.count > 1;
+      // Expanded state is tracked by pos.id (stable) so it survives the
+      // signature-based re-renders — otherwise a refresh would collapse the
+      // detail the user just opened.
+      const expanded = hasExits && this._expandedTrades && this._expandedTrades.has(pos.id);
+      const dir = pos.side === 'long' ? 1 : -1;
+      const detailRow = hasExits ? `
+        <tr class="sim-history-exit-detail" data-detail-idx="${idx}" ${expanded ? '' : 'hidden'}>
+          <td colspan="11">
+            <div class="exit-detail">
+              <span class="exit-detail-title">${escapeHtml(t_('history.exitDetailTitle'))}</span>
+              ${exitInfo.legs.map((l, i) => {
+                const legPnl = (l.price - entryPrice) * dir * l.qty * pv * lot;
+                const legCls = legPnl > 0 ? 'pos' : (legPnl < 0 ? 'neg' : 'zero');
+                return `<div class="exit-leg">
+                  <span class="exit-leg-idx">#${i + 1}</span>
+                  <span class="exit-leg-type">${escapeHtml(l.typeLabel)}</span>
+                  <span class="exit-leg-time">${escapeHtml(fmtTs(l.ts))}</span>
+                  <span class="exit-leg-price">@ ${escapeHtml(fmtPx(l.price))}</span>
+                  <span class="exit-leg-qty">${l.qty}</span>
+                  <span class="exit-leg-pl ${legCls}">${fmtPL(legPnl)} ${escapeHtml(cur)}</span>
+                </div>`;
+              }).join('')}
+            </div>
+          </td>
+        </tr>` : '';
+
       return `
-        <tr class="sim-history-trade trade-${sideClass}">
+        <tr class="sim-history-trade trade-${sideClass}${hasExits ? ' has-exits' : ''}${expanded ? ' expanded' : ''}" data-trade-idx="${idx}" data-pos-id="${pos.id}">
           <td class="sim-history-num">
             <div class="line-top idx">${idx + 1}</div>
             <div class="line-bot side ${sideClass}">${sideText}</div>
           </td>
           <td class="sim-history-time">
             <div class="line-top">${entryWord}  ${escapeHtml(fmtTs(entryTs))}</div>
-            <div class="line-bot">${escapeHtml(exitTimeStr)}</div>
+            <div class="line-bot">${hasExits ? '<span class="exit-expand-chev">▸</span> ' : ''}${escapeHtml(exitTimeStr)}</div>
           </td>
           <td class="sim-history-ordertype">
             <div class="line-top">${escapeHtml(entryTypeLabel)}</div>
@@ -488,7 +566,7 @@
             <button type="button" class="sim-history-row-delete"
                     data-pos-id="${pos.id}" title="${escapeHtml(t_('history.deleteRowTooltip'))}">✕</button>
           </td>
-        </tr>
+        </tr>${detailRow}
       `;
     },
 
@@ -656,7 +734,7 @@
           return;
         }
         const aoa = [this._exportHeader()].concat(
-          trades.map((t, idx) => this._exportRow(t, idx, trades)));
+          trades.flatMap((t, idx) => this._exportRow(t, idx, trades)));
         const ws = window.XLSX.utils.aoa_to_sheet(aoa);
         window.XLSX.utils.book_append_sheet(wb, ws,
           this._sheetName(branch.name));
@@ -732,20 +810,26 @@
       ];
     },
 
+    /** Returns an ARRAY of export rows for one trade. A scaled-out trade
+     *  (>1 exit fill) emits ONE ROW PER EXIT LEG — each with the entry
+     *  repeated and that leg's own exit time / type / price / qty / P&L —
+     *  so the fills are fully recorded for review / corpus. Single-exit and
+     *  open trades emit a single row (unchanged shape). Caller flatMaps. */
     _exportRow(pos, idx, allTrades) {
       const eng = window.SimController && window.SimController.engine;
       const Engine = window.BranchEngine;
       const spec = (window.SimController && window.SimController.spec) || {};
       const pv  = spec.pointValue || 1;
       const lot = spec.lotSize    || 1;
-      // Cumulative — recompute against allTrades up to and including idx.
-      let cum = 0;
-      for (let i = 0; i <= idx; i++) {
+      // Cumulative through the PRIOR trades; this trade's legs add on below
+      // so the last leg's cum equals the per-trade cumulative.
+      let cumBefore = 0;
+      for (let i = 0; i < idx; i++) {
         const p = allTrades[i];
         const r = Number.isFinite(p.realisedPnL)   ? p.realisedPnL   : 0;
         const u = Number.isFinite(p.unrealisedPnL) ? p.unrealisedPnL : 0;
         const c = Number.isFinite(p.commissionPaid) ? p.commissionPaid : 0;
-        cum += (r + u - c);
+        cumBefore += (r + u - c);
       }
       const realised = Number.isFinite(pos.realisedPnL)   ? pos.realisedPnL   : 0;
       const unreal   = Number.isFinite(pos.unrealisedPnL) ? pos.unrealisedPnL : 0;
@@ -757,49 +841,61 @@
       const entryTs    = (entryOrder && entryOrder.filledAtBarTs) || pos.openedAtBarTs;
       const entryPrice = (entryOrder && entryOrder.fillPrice) || pos.avgEntryPrice;
       const isClosed = pos.closedAtBarTs != null;
-      let exitTs = null, exitPrice = null, exitTypeLabel = '';
-      if (isClosed && pos.exitOrderIds && pos.exitOrderIds.length) {
-        const exitOrderId = pos.exitOrderIds[pos.exitOrderIds.length - 1];
-        const exitOrder = eng && eng.getOrder ? eng.getOrder(exitOrderId) : null;
-        if (exitOrder) {
-          exitTs = exitOrder.filledAtBarTs;
-          exitPrice = exitOrder.fillPrice;
-          exitTypeLabel = orderTypeLabel(exitOrder, 'exit', pos);
-        }
-      }
-      const tradeQty = (pos.entryQty != null) ? pos.entryQty : pos.qty;
-      const notional = (entryPrice || 0) * tradeQty * pv * lot;
-      let netPct = 0;
-      if (isClosed && Number.isFinite(exitPrice) && entryPrice > 0) {
-        const dir = pos.side === 'long' ? 1 : -1;
-        netPct = ((exitPrice - entryPrice) / entryPrice) * 100 * dir;
-      }
+      const dir = pos.side === 'long' ? 1 : -1;
+      const sideLabel = pos.side === 'long' ? t_('sim.posSideLong') : t_('sim.posSideShort');
+      const entryTypeLabel = orderTypeLabel(entryOrder, 'entry');
       const branchId = pos.branchId || 'main';
       const br = Engine && Engine.getBranch ? Engine.getBranch(branchId) : null;
       const branchName = br ? br.name : branchId;
-      // xlsx export uses the same year-prefixed format as the on-
-      // screen table so the spreadsheet is self-contained — readers
-      // don't need to know which year's session it came from.
       const fmtTs = window.formatBarTimeFull || window.formatBarTime
                     || ((t) => t ? new Date(t).toISOString() : '');
-      return [
-        idx + 1,
-        pos.side === 'long' ? t_('sim.posSideLong') : t_('sim.posSideShort'),
-        entryTs ? fmtTs(entryTs) : '',
-        orderTypeLabel(entryOrder, 'entry'),
-        Number.isFinite(entryPrice) ? Number(entryPrice.toFixed(2)) : '',
-        isClosed && exitTs ? fmtTs(exitTs) : (isClosed ? '' : t_('history.holdingPos')),
-        isClosed ? exitTypeLabel : '',
-        isClosed && Number.isFinite(exitPrice) ? Number(exitPrice.toFixed(2)) : '',
-        tradeQty,
-        Number(notional.toFixed(2)),
-        Number(netPL.toFixed(2)),
-        isClosed ? Number(netPct.toFixed(2)) : '',
-        Number((pos.mfe || 0).toFixed(2)),
-        Number((pos.mae || 0).toFixed(2)),
-        Number(cum.toFixed(2)),
-        branchName,
-      ];
+      const num2 = (n) => Number(n.toFixed(2));
+      const entryCell = Number.isFinite(entryPrice) ? num2(entryPrice) : '';
+      const entryTsCell = entryTs ? fmtTs(entryTs) : '';
+      const exitInfo = this._exitLegsInfo(pos, eng);
+
+      // Open or single-exit → one row (unchanged shape).
+      if (!isClosed || exitInfo.count <= 1) {
+        const leg = exitInfo.count === 1 ? exitInfo.legs[0] : null;
+        const exitPrice = leg ? leg.price : null;
+        const tradeQty = (pos.entryQty != null) ? pos.entryQty : pos.qty;
+        const notional = (entryPrice || 0) * tradeQty * pv * lot;
+        let netPct = 0;
+        if (isClosed && Number.isFinite(exitPrice) && entryPrice > 0) {
+          netPct = ((exitPrice - entryPrice) / entryPrice) * 100 * dir;
+        }
+        return [[
+          idx + 1, sideLabel, entryTsCell, entryTypeLabel, entryCell,
+          isClosed && leg ? fmtTs(leg.ts) : (isClosed ? '' : t_('history.holdingPos')),
+          isClosed && leg ? leg.typeLabel : '',
+          isClosed && Number.isFinite(exitPrice) ? num2(exitPrice) : '',
+          tradeQty, num2(notional),
+          num2(netPL), isClosed ? num2(netPct) : '',
+          num2(pos.mfe || 0), num2(pos.mae || 0), num2(cumBefore + netPL), branchName,
+        ]];
+      }
+
+      // Scale-out → one row per exit leg.
+      const rows = [];
+      let cum = cumBefore;
+      exitInfo.legs.forEach((l, i) => {
+        const isLast = i === exitInfo.legs.length - 1;
+        // Per-leg gross; the last leg absorbs the trade's commission so the
+        // leg rows sum exactly to the trade's net P&L.
+        let legPnl = (l.price - entryPrice) * dir * l.qty * pv * lot;
+        if (isLast) legPnl -= comm;
+        const legPct = entryPrice > 0 ? ((l.price - entryPrice) / entryPrice) * 100 * dir : 0;
+        const legNotional = (entryPrice || 0) * l.qty * pv * lot;
+        cum += legPnl;
+        rows.push([
+          idx + 1, sideLabel, entryTsCell, entryTypeLabel, entryCell,
+          fmtTs(l.ts), l.typeLabel, num2(l.price), l.qty, num2(legNotional),
+          num2(legPnl), num2(legPct),
+          i === 0 ? num2(pos.mfe || 0) : '', i === 0 ? num2(pos.mae || 0) : '',
+          num2(cum), branchName,
+        ]);
+      });
+      return rows;
     },
 
     /** xlsx sheet names: max 31 chars, no `\ / ? * [ ]` per Excel

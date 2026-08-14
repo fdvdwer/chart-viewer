@@ -4,6 +4,7 @@
  * Hotkeys:
  *   Alt+T  trendline
  *   Alt+R  rectangle
+ *   Alt+C  curve
  *   Alt+P  path
  *   Alt+M  measure (date & price range)
  *   Alt+L  long position (single click → default 1:1 R:R)
@@ -38,6 +39,33 @@ const Drawing = {
 
 function trackOverlay(ov) {
   if (!ov || !ov.id) return;
+  // Mini-drawn overlays live on the mini chart instance — keep them in a
+  // SEPARATE registry so they don't pollute the main chart's registry /
+  // persistence / branch filter. branchId = the mini's branch.
+  if ((Drawing._drawHost || 'main') === 'mini') {
+    const mbid = (window.BranchEngine && window.BranchEngine.miniBranchId) || 'main';
+    if (!Drawing._miniRegistry) Drawing._miniRegistry = new Map();
+    // Logical key (stable across reloads) + _ovid (the current mini-chart
+    // overlay id; the one just drawn). Persist so it survives a reload.
+    const key = 'm' + (Drawing._miniSeq = (Drawing._miniSeq || 0) + 1);
+    Drawing._miniRegistry.set(key, {
+      key, name: ov.name, visible: ov.visible !== false, lock: !!ov.lock,
+      styles: ov.styles,
+      points: (ov.points || []).map(p => ({ timestamp: p.timestamp, value: p.value })),
+      extendData: ov.extendData, branchId: mbid, _ovid: ov.id,
+    });
+    schedulePersist();
+    return;
+  }
+  // Every drawn overlay is BRANCH-SCOPED: it belongs to the
+  // branch that was active when it was drawn, so switching the active
+  // branch shows only that branch's overlays (see applyBranchFilter).
+  // Indicator overlays don't go through trackOverlay → unaffected.
+  // Overlays loaded from disk keep their saved branchId via
+  // _hydrateOverlays; this path stamps freshly-drawn ones. A stored
+  // branchId of null (pre-feature drawings) is treated as GLOBAL by
+  // applyBranchFilter — always visible.
+  const branchId = (window.BranchEngine && window.BranchEngine.activeBranchId) || 'main';
   Drawing.overlayRegistry.set(ov.id, {
     id: ov.id,
     name: ov.name,
@@ -46,18 +74,144 @@ function trackOverlay(ov) {
     styles: ov.styles,
     points: ov.points,
     extendData: ov.extendData,
+    branchId,
   });
+  // A brand-new overlay lands with zLevel 0 — BELOW every ranked overlay (which
+  // start at 1) — so it would be buried under any rectangle covering it and
+  // couldn't be clicked until a hover bumped it. Rank it immediately (coalesced,
+  // so a bulk restore pays for one pass, not one per overlay).
+  scheduleAutoZLevels();
   schedulePersist();
 }
+// Exposed so programmatic drawers can register their
+// overlays as first-class: persisted with the layout, reanchored on TF/replay
+// changes, and managed by clear-all / object tree — same lifecycle as
+// user-drawn overlays.
+Drawing.trackOverlay = trackOverlay;
+
+// Branch-scoped overlay visibility. Position overlays carry a `branchId`
+// (stamped in trackOverlay / restored in _hydrateOverlays). When the user
+// switches the active branch we HIDE the position boxes that don't belong to
+// it and show the ones that do — without touching `entry.visible`, which is
+// the user's own manual eye-icon hide state (effective = both must be true).
+// Global overlays (branchId null: structure lines, zones) are left alone.
+function applyBranchFilter() {
+  if (!Drawing.chart || !Drawing.overlayRegistry) return;
+  const active = (window.BranchEngine && window.BranchEngine.activeBranchId) || 'main';
+  for (const entry of Drawing.overlayRegistry.values()) {
+    if (!entry || !entry.branchId) continue;        // global — untouched
+    const eff = (entry.visible !== false) && (entry.branchId === active);
+    try { Drawing.chart.overrideOverlay({ id: entry.id, visible: eff }); } catch (e) {}
+  }
+}
+Drawing.applyBranchFilter = applyBranchFilter;
+
+// Cascade-delete: when a branch is deleted (BranchEngine.deleteBranch emits
+// 'branchDeleted'), every overlay that was drawn while that branch was active
+// must be removed too — otherwise it orphans (keeps the dead branchId and, per
+// applyBranchFilter, would never match any active branch again → invisible but
+// still persisted). Children of the deleted branch re-parent (engine does that),
+// but overlays DELETE, they don't re-parent. Covers BOTH the main
+// overlayRegistry (via chart.removeOverlay) AND the mini _miniRegistry (via
+// miniChart.removeOverlay when its _ovid is live).
+function removeBranchOverlays(deletedId) {
+  if (!deletedId) return;
+  let removed = 0;
+  // Main-chart overlays.
+  if (Drawing.overlayRegistry) {
+    const ids = [];
+    for (const entry of Drawing.overlayRegistry.values()) {
+      if (entry && entry.branchId === deletedId) ids.push(entry.id);
+    }
+    for (const id of ids) {
+      try { if (Drawing.chart) Drawing.chart.removeOverlay({ id }); } catch (e) {}
+      Drawing.overlayRegistry.delete(id);
+      if (Drawing.selectedOverlay && Drawing.selectedOverlay.id === id) Drawing.selectedOverlay = null;
+      removed++;
+    }
+  }
+  // Mini-chart overlays.
+  if (Drawing._miniRegistry) {
+    const miniChart = window.MiniChart && window.MiniChart.chart;
+    const keys = [];
+    for (const [k, e] of Drawing._miniRegistry) {
+      if (e && e.branchId === deletedId) keys.push([k, e]);
+    }
+    for (const [k, e] of keys) {
+      if (e._ovid) { try { if (miniChart) miniChart.removeOverlay({ id: e._ovid }); } catch (err) {} }
+      Drawing._miniRegistry.delete(k);
+      if (Drawing.selectedOverlay && Drawing.selectedOverlay.id === e._ovid) Drawing.selectedOverlay = null;
+      removed++;
+    }
+  }
+  if (removed) {
+    try { refreshObjectTree(); } catch (e) {}
+    schedulePersist();
+  }
+  return removed;
+}
+Drawing.removeBranchOverlays = removeBranchOverlays;
+
+// Render the mini-drawn overlays belonging to `branchId` onto the mini chart:
+// override existing (reanchor dataIndex), create missing, drop the rest. Called
+// by MiniChart on show / mini-branch switch — NOT per replay tick, so it never
+// churns (unlike the reverted per-tick mirror). branchId null clears them all.
+Drawing.renderMiniBranchOverlays = function (miniChart, branchId) {
+  if (!miniChart || !Drawing._miniRegistry) return;
+  const data = (miniChart.getDataList && miniChart.getDataList()) || [];
+  const idxByTs = (ts) => { let b = 0; for (let i = 0; i < data.length; i++) { if (data[i].timestamp <= ts) b = i; else break; } return b; };
+  for (const e of Drawing._miniRegistry.values()) {
+    const want = !!branchId && e.branchId === branchId && e.visible !== false
+      && e.points && e.points.length >= 2;
+    if (!want) {
+      if (e._ovid) { try { miniChart.removeOverlay({ id: e._ovid }); } catch (err) {} e._ovid = null; }
+      continue;
+    }
+    const points = e.points.map(p => ({ timestamp: p.timestamp, value: p.value, dataIndex: idxByTs(p.timestamp) }));
+    if (e._ovid) {
+      try { miniChart.overrideOverlay({ id: e._ovid, points }); } catch (err) {}
+    } else {
+      const spec = { name: e.name, points };
+      if (e.styles)     spec.styles     = e.styles;
+      if (e.extendData) spec.extendData = e.extendData;
+      try { const id = miniChart.createOverlay(spec); if (typeof id === 'string') e._ovid = id; } catch (err) {}
+    }
+  }
+};
+
+// Which chart instance an overlay id lives on: the main chart by default, the
+// mini chart if the id matches a live _miniRegistry entry's _ovid. Lets
+// operations on the selected overlay (live style preview, delete…) target the
+// right chart instead of the hardcoded main one.
+function _chartOf(id) {
+  if (id && Drawing._miniRegistry) {
+    for (const e of Drawing._miniRegistry.values()) {
+      if (e._ovid === id) return (window.MiniChart && window.MiniChart.chart) || Drawing.chart;
+    }
+  }
+  return Drawing.chart;
+}
+Drawing._chartOf = _chartOf;
 
 function untrackOverlay(id) {
-  if (id) Drawing.overlayRegistry.delete(id);
+  if (id) {
+    if (Drawing.overlayRegistry.has(id)) Drawing.overlayRegistry.delete(id);
+    else if (Drawing._miniRegistry) {
+      for (const [k, e] of Drawing._miniRegistry) { if (e._ovid === id) { Drawing._miniRegistry.delete(k); break; } }
+    }
+  }
   schedulePersist();
 }
 
 function updateTrackedOverlay(id, patch) {
   const entry = Drawing.overlayRegistry.get(id);
-  if (entry) Object.assign(entry, patch);
+  if (entry) { Object.assign(entry, patch); schedulePersist(); return; }
+  // Mini-drawn overlay — patch its _miniRegistry entry (id === live _ovid).
+  if (Drawing._miniRegistry) {
+    for (const e of Drawing._miniRegistry.values()) {
+      if (e._ovid === id) { Object.assign(e, patch); schedulePersist(); return; }
+    }
+  }
   schedulePersist();
 }
 
@@ -94,7 +248,25 @@ function _snapshotOverlays() {
       extendData: e.extendData || null,
       lock: !!e.lock,
       visible: e.visible !== false,
+      branchId: e.branchId || null,
+      host: 'main',
     });
+  }
+  // Mini-drawn overlays (separate registry) — persisted alongside the main
+  // ones with host:'mini' so restore routes them back to the mini chart.
+  if (Drawing._miniRegistry) {
+    for (const e of Drawing._miniRegistry.values()) {
+      if (!e || !e.points || e.points.length < 2) continue;
+      const pts = e.points.map(p => ({
+        timestamp: Number.isFinite(p.timestamp) ? p.timestamp : null, value: p.value,
+      })).filter(p => Number.isFinite(p.timestamp) && Number.isFinite(p.value));
+      if (pts.length < 2) continue;
+      items.push({
+        name: e.name, points: pts, styles: e.styles || null,
+        extendData: e.extendData || null, lock: !!e.lock,
+        visible: e.visible !== false, branchId: e.branchId || null, host: 'mini',
+      });
+    }
   }
   return items;
 }
@@ -130,16 +302,36 @@ function _hydrateOverlays(items) {
   let count = 0;
   for (const item of items) {
     if (!item || !item.name || !Array.isArray(item.points) || item.points.length < 2) continue;
+    // Mini-drawn overlays: stash in _miniRegistry (logical, no chart overlay
+    // yet). Rendered on the mini chart when it opens on their branch.
+    if (item.host === 'mini') {
+      if (!Drawing._miniRegistry) Drawing._miniRegistry = new Map();
+      const key = 'm' + (Drawing._miniSeq = (Drawing._miniSeq || 0) + 1);
+      Drawing._miniRegistry.set(key, {
+        key, name: item.name,
+        points: item.points.map(p => ({ timestamp: p.timestamp, value: p.value })),
+        styles: item.styles || undefined, extendData: item.extendData || undefined,
+        lock: !!item.lock, visible: item.visible !== false,
+        branchId: item.branchId || null, _ovid: null,
+      });
+      count++;
+      continue;
+    }
     const points = item.points.map(p => ({
       timestamp: p.timestamp,
       value: p.value,
       dataIndex: bars.length ? findDataIndexByTimestamp(bars, p.timestamp) : 0,
     }));
+    const branchId = item.branchId || null;
+    const active = (window.BranchEngine && window.BranchEngine.activeBranchId) || 'main';
+    const branchVisible = !branchId || branchId === active;
     const opts = { name: item.name, points };
     if (item.styles)     opts.styles     = item.styles;
     if (item.extendData) opts.extendData = item.extendData;
     if (item.lock)       opts.lock       = true;
-    if (item.visible === false) opts.visible = false;
+    // Effective visibility = user's manual visible AND branch match, so a
+    // branch-scoped box hydrates hidden when it isn't the active branch's.
+    if (item.visible === false || !branchVisible) opts.visible = false;
     let newId;
     try { newId = Drawing.chart.createOverlay(opts); } catch (err) { continue; }
     if (typeof newId !== 'string') continue;
@@ -148,6 +340,7 @@ function _hydrateOverlays(items) {
       styles: item.styles || undefined,
       extendData: item.extendData || undefined,
       lock: !!item.lock, visible: item.visible !== false,
+      branchId,
     });
     count++;
   }
@@ -168,7 +361,12 @@ async function restoreOverlays(symbol, layoutId) {
   if (Array.isArray(serverItems) && serverItems.length) {
     _hydrateOverlays(serverItems);
     try { localStorage.setItem(storageKey(sym, lid), JSON.stringify(serverItems)); } catch (e) {}
+    // Rank the restored drawings by area so a rectangle never sits above what
+    // it covers (see the Z-ORDER block).
+    try { applyAutoZLevels(); } catch (e) {}
     refreshObjectTree();
+    applyBranchFilter();
+    _rerenderMiniAfterRestore();
     return;
   }
 
@@ -188,7 +386,22 @@ async function restoreOverlays(symbol, layoutId) {
       });
     } catch (e) {}
   }
+  // Same ranking pass for the localStorage-cache restore path.
+  try { applyAutoZLevels(); } catch (e) {}
   refreshObjectTree();
+  applyBranchFilter();
+  _rerenderMiniAfterRestore();
+}
+
+// After drawings restore, if the mini chart is already open, re-render its
+// branch overlays now that _miniRegistry is hydrated (MiniChart.init's first
+// _show may have run before restore finished, so its overlays were skipped).
+function _rerenderMiniAfterRestore() {
+  if (window.MiniChart && window.MiniChart.chart && window.BranchEngine
+      && Drawing.renderMiniBranchOverlays) {
+    try { Drawing.renderMiniBranchOverlays(window.MiniChart.chart, window.BranchEngine.miniBranchId); }
+    catch (e) { /* ignore */ }
+  }
 }
 
 // One-time migration: if the old global key still exists and the current
@@ -266,22 +479,23 @@ function snapToOHLC(bar, value) {
 // the value to #chart AND each canvas child with `!important` (same technique
 // as the rect hover cursor). Pass '' to clear.
 function setGlobalCursor(value) {
-  const chartEl = document.getElementById('chart');
+  // Apply to BOTH the main and mini chart containers — the canvas' own cursor
+  // overrides body, so setting only #chart left the mini with no grab/grabbing
+  // feedback during a drag.
+  const els = [document.getElementById('chart'), document.getElementById('mini-chart')];
   if (value) {
     document.body.style.cursor = value;
-    if (chartEl) {
-      chartEl.style.setProperty('cursor', value, 'important');
-      chartEl.querySelectorAll('canvas').forEach(cv => {
-        cv.style.setProperty('cursor', value, 'important');
-      });
+    for (const el of els) {
+      if (!el) continue;
+      el.style.setProperty('cursor', value, 'important');
+      el.querySelectorAll('canvas').forEach(cv => cv.style.setProperty('cursor', value, 'important'));
     }
   } else {
     document.body.style.cursor = '';
-    if (chartEl) {
-      chartEl.style.removeProperty('cursor');
-      chartEl.querySelectorAll('canvas').forEach(cv => {
-        cv.style.removeProperty('cursor');
-      });
+    for (const el of els) {
+      if (!el) continue;
+      el.style.removeProperty('cursor');
+      el.querySelectorAll('canvas').forEach(cv => cv.style.removeProperty('cursor'));
     }
   }
 }
@@ -367,29 +581,69 @@ function _clickOnTrendlineText(mx, my, entry) {
   return Math.abs(lx) <= halfW && Math.abs(ly) <= halfH;
 }
 
+// Build overlay points for the MINI chart: dataIndex computed against the
+// mini's OWN bars (independent of the main chart's index).
+function _pointsForMini(miniChart, pts) {
+  const data = (miniChart && miniChart.getDataList && miniChart.getDataList()) || [];
+  const idxByTs = (ts) => { let b = 0; for (let i = 0; i < data.length; i++) { if (data[i].timestamp <= ts) b = i; else break; } return b; };
+  return (pts || []).map(p => ({ timestamp: p.timestamp, value: p.value, dataIndex: idxByTs(p.timestamp) }));
+}
+
+// Repaint an overlay on the chart it lives on. The main chart repaints itself
+// on select/deselect; the mini chart doesn't, and an empty overrideOverlay is a
+// no-op — so re-pass the overlay's own points to force createPointFigures to
+// re-run (which is what paints/clears the selection handles).
+function _repaintOverlayOnItsChart(id) {
+  const c = _chartOf(id);
+  if (!c || c === Drawing.chart) return;   // main repaints on its own
+  try {
+    const o = c.getOverlayById && c.getOverlayById(id);
+    if (o && o.points) c.overrideOverlay({ id, points: o.points.map(p => ({ ...p })) });
+  } catch (e) { /* ignore */ }
+}
+
 // ===== Shared interaction handlers for selectable overlays =====
 // (path_snap = drawing template, NOT included; right-click on it finalizes path)
 const overlayInteractions = {
   onSelected: (event) => {
-    if (event && event.overlay) Drawing.selectedOverlay = event.overlay;
+    if (event && event.overlay) {
+      Drawing.selectedOverlay = event.overlay;
+      _repaintOverlayOnItsChart(event.overlay.id);
+      markSelectedTreeRow(event.overlay.id);   // canvas click → highlight tree row
+    }
     return true;
   },
   onDeselected: () => {
+    const prev = Drawing.selectedOverlay;
     Drawing.selectedOverlay = null;
+    if (prev && prev.id) _repaintOverlayOnItsChart(prev.id);
+    markSelectedTreeRow(null);                  // clear tree-row highlight
     return true;
   },
   onRightClick: (event) => {
-    if (event && event.overlay) Drawing.selectedOverlay = event.overlay;
+    if (event && event.overlay) {
+      Drawing.selectedOverlay = event.overlay;
+      markSelectedTreeRow(event.overlay.id);
+    }
     showContextMenu(Drawing.lastMousePage.pageX, Drawing.lastMousePage.pageY);
     return true; // tell KLineChart we handled it
   },
   onMouseEnter: (event) => {
     if (event && event.overlay) {
+      // CANCEL KLineChart's hover bump. Its store does, in this exact order:
+      //   instance.setZLevel(Number.MAX_SAFE_INTEGER) → onMouseEnter (here) → _sort()
+      // so writing our own level back NOW means the sort never sees the bump.
+      // Restoring on mouseLeave instead does NOT work: once an overlay big enough
+      // to cover the chart is bumped, it stays the hover target forever, the
+      // hovered instance never changes, leave never fires — a deadlock where
+      // nothing underneath can be hovered or clicked again.
+      cancelHoverZBump(event.overlay);
       _hoveredOverlayId = event.overlay.id;
       setObjectTreeHover(event.overlay.id, true);
-      // Trigger a redraw so trendline placeholder can appear on hover.
+      // Trigger a redraw so trendline placeholder can appear on hover. Route to
+      // the overlay's own chart so a mini trendline redraws on the mini.
       if (event.overlay.name === 'trendline_snap' && Drawing.chart) {
-        try { Drawing.chart.overrideOverlay({ id: event.overlay.id }); } catch (e) {}
+        try { _chartOf(event.overlay.id).overrideOverlay({ id: event.overlay.id }); } catch (e) {}
       }
       // Pointer cursor signals "this is clickable/draggable". Rectangle is
       // handled by its own mousemove hit-test (handle = resize arrow,
@@ -404,8 +658,12 @@ const overlayInteractions = {
     if (event && event.overlay) {
       if (_hoveredOverlayId === event.overlay.id) _hoveredOverlayId = null;
       setObjectTreeHover(event.overlay.id, false);
+      // KLineChart bumped this overlay to zLevel MAX_SAFE_INTEGER on enter and
+      // never puts it back — without this, whatever you last hovered stays on
+      // top forever and swallows clicks (see the Z-ORDER block).
+      restoreZLevelAfterHover(event.overlay.id);
       if (event.overlay.name === 'trendline_snap' && Drawing.chart) {
-        try { Drawing.chart.overrideOverlay({ id: event.overlay.id }); } catch (e) {}
+        try { _chartOf(event.overlay.id).overrideOverlay({ id: event.overlay.id }); } catch (e) {}
       }
       if (!_overlayDrag && !_rectDrag && event.overlay.name !== 'rectangle_snap') {
         setGlobalCursor('');
@@ -438,17 +696,29 @@ const overlayInteractions = {
     _overlayDrag = false;
     setGlobalCursor('');
     // Sync the dragged overlay's new points back to the registry + persist.
+    // chart-aware: a mini overlay's points go to _miniRegistry (timestamp+
+    // value); the main registry never has its id, so the old code silently
+    // dropped drag edits on mini overlays (undo/persist saw stale shape).
     const ov = event && event.overlay;
     if (ov && ov.id && Array.isArray(ov.points)) {
-      const entry = Drawing.overlayRegistry.get(ov.id);
-      if (entry) entry.points = ov.points.map(p => ({ ...p }));
-      // Push undo entry — drag was a single logical operation;
-      // mid-drag state changes don't get individual entries.
+      const opChart = _chartOf(ov.id);
+      const isMini = opChart !== Drawing.chart;
+      const syncReg = (id, pts) => {
+        if (isMini) {
+          if (Drawing._miniRegistry) for (const e of Drawing._miniRegistry.values()) {
+            if (e._ovid === id) { e.points = pts.map(p => ({ timestamp: p.timestamp, value: p.value })); break; }
+          }
+        } else {
+          const entry = Drawing.overlayRegistry.get(id);
+          if (entry) entry.points = pts.map(p => ({ ...p }));
+        }
+      };
+      const ptsFor = (pts) => isMini ? _pointsForMini(opChart, pts) : _pointsForChart(pts);
+      syncReg(ov.id, ov.points);
+      // Push undo entry — drag was a single logical operation.
       const before = _overlayDragBefore;
       if (before && before.id === ov.id) {
         const after = ov.points.map(p => ({ ...p }));
-        // Skip pushing if nothing actually moved (user clicked but
-        // didn't drag — KLineChart still fires the pair).
         const sameAsBefore = before.points.length === after.length
           && before.points.every((p, i) =>
               p.timestamp === after[i].timestamp && p.value === after[i].value);
@@ -457,16 +727,8 @@ const overlayInteractions = {
           const beforePts = before.points;
           pushUndo({
             label: 'Move overlay',
-            undo: () => {
-              try { Drawing.chart.overrideOverlay({ id, points: _pointsForChart(beforePts) }); } catch (e) {}
-              const e2 = Drawing.overlayRegistry.get(id);
-              if (e2) e2.points = beforePts.map(p => ({ ...p }));
-            },
-            redo: () => {
-              try { Drawing.chart.overrideOverlay({ id, points: _pointsForChart(after) }); } catch (e) {}
-              const e2 = Drawing.overlayRegistry.get(id);
-              if (e2) e2.points = after.map(p => ({ ...p }));
-            },
+            undo: () => { try { opChart.overrideOverlay({ id, points: ptsFor(beforePts) }); } catch (e) {} syncReg(id, beforePts); },
+            redo: () => { try { opChart.overrideOverlay({ id, points: ptsFor(after) }); } catch (e) {} syncReg(id, after); },
           });
         }
       }
@@ -487,6 +749,197 @@ function setObjectTreeHover(id, on) {
   if (!list || !id) return;
   const row = list.querySelector(`[data-overlay-id="${id}"]`);
   if (row) row.classList.toggle('hover', !!on);
+}
+
+// Mark the object-tree row for `id` as selected (clears any prior selection).
+// Pass null/undefined to just clear. Kept in sync with Drawing.selectedOverlay
+// from BOTH directions: a chart click (overlayInteractions.onSelected) and an
+// object-tree row click (selectOverlayFromTree).
+function markSelectedTreeRow(id) {
+  const list = document.getElementById('obj-tree-list');
+  if (!list) return;
+  list.querySelectorAll('.obj-row.selected').forEach(r => r.classList.remove('selected'));
+  if (id) {
+    const row = list.querySelector(`[data-overlay-id="${id}"]`);
+    if (row) row.classList.add('selected');
+  }
+}
+Drawing.markSelectedTreeRow = markSelectedTreeRow;
+
+// Force an overlay to re-run createPointFigures on whichever chart it lives on,
+// so its selection handles paint/clear when Drawing.selectedOverlay changes from
+// a NON-canvas source (an object-tree click). Unlike _repaintOverlayOnItsChart
+// this also repaints the MAIN chart — a JS-set selection doesn't trigger
+// KLineChart's own on-select redraw, so the handles wouldn't appear otherwise.
+function _forceSelectRepaint(id) {
+  const c = _chartOf(id);
+  if (!c) return;
+  try {
+    const o = c.getOverlayById && c.getOverlayById(id);
+    if (o && o.points) c.overrideOverlay({ id, points: o.points.map(p => ({ ...p })) });
+  } catch (e) { /* ignore */ }
+}
+
+// Select an overlay from an object-tree row click: set the JS selection, repaint
+// the old + new overlay so handles move, and highlight the row. Mirrors what a
+// canvas click does (overlayInteractions.onSelected) so the two stay in sync.
+function selectOverlayFromTree(id) {
+  if (!id) return;
+  const prev = Drawing.selectedOverlay;
+  const c = _chartOf(id);
+  const live = (c && c.getOverlayById && c.getOverlayById(id)) || null;
+  Drawing.selectedOverlay = live || Drawing.overlayRegistry.get(id) || { id };
+  if (prev && prev.id && prev.id !== id) _forceSelectRepaint(prev.id);
+  _forceSelectRepaint(id);
+  markSelectedTreeRow(id);
+}
+Drawing.selectOverlayFromTree = selectOverlayFromTree;
+
+// Open the mini (sub) chart showing `branchId` (idempotent). The mini's
+// visibility is driven by BranchEngine.miniBranchId → setMiniBranch shows it and
+// renders that branch's mini overlays (which assigns each entry its live _ovid).
+function _ensureMiniOpenForBranch(branchId) {
+  const BE = window.BranchEngine;
+  const MC = window.MiniChart;
+  if (!BE || !BE.setMiniBranch) return;
+  const bid = branchId || (BE.miniBranchId) || 'main';
+  const needShow = BE.miniBranchId !== bid || (MC && MC.el && MC.el.hidden);
+  if (needShow) { try { BE.setMiniBranch(bid); } catch (e) {} }
+}
+
+// Scroll `chart` so `ts` sits near the center of the viewport. scrollToDataIndex
+// right-aligns its arg, so we add half a viewport to center the object.
+function _jumpChartToTimestamp(chart, ts) {
+  if (!chart || !Number.isFinite(ts) || !chart.scrollToDataIndex) return;
+  const bars = (chart.getDataList && chart.getDataList()) || [];
+  if (!bars.length) return;
+  const idx = findDataIndexByTimestamp(bars, ts);
+  const vr = chart.getVisibleRange ? chart.getVisibleRange() : null;
+  const width = vr ? Math.max(10, vr.to - vr.from) : 60;
+  // Instant (duration 0): a jump is a teleport, and an animated scroll depends
+  // on requestAnimationFrame — reliable and verifiable without it.
+  try { chart.scrollToDataIndex(Math.round(idx + width / 2), 0); } catch (e) {}
+}
+
+// Jump the chart(s) to an overlay's location. A mini overlay first opens the mini
+// for its branch (so it's visible); the mini viewport is X-synced to the main, so
+// scrolling the main brings the mini along — we also nudge the mini directly.
+function jumpToOverlay(host, branchId, ts) {
+  if (host === 'mini') _ensureMiniOpenForBranch(branchId);
+  // In replay, delegate to the replay engine's jump — it loads a bounded history
+  // window around ts (the date-picker path), so a jump to an object outside the
+  // loaded window doesn't stretch the placeholder zone / compress the K-bars.
+  // The mini viewport is X-synced, so it follows. In live mode a plain
+  // scrollToDataIndex is enough (bars are already loaded / lazy-load on scroll).
+  // In replay, jumping to an object in the ALREADY-PLAYED bars is VIEW-ONLY —
+  // scroll to it WITHOUT moving the replay cursor, so it does NOT count as
+  // replay progress (no rewind, no maxCursorTs bump [spec §3.2.3 anti-lookahead
+  // boundary], no tick-record wipe). But an object the replay HASN'T reached yet
+  // (ts past the cursor → placeholder bars, not loaded) or before the loaded
+  // window can't be shown that way, so: EXIT replay + load a bounded window
+  // around it (Aaron's ask — the replay's future bars simply aren't there).
+  if (window.Replay && window.Replay.active) {
+    const R = window.Replay;
+    const bb = R.baseBars;
+    const firstLoaded = (bb && bb.length) ? bb[0].timestamp : null;
+    const showable = Number.isFinite(R.cursorTimestamp) && Number.isFinite(firstLoaded)
+      && Number.isFinite(ts) && ts >= firstLoaded && ts <= R.cursorTimestamp;
+    if (showable) { _scrollReplayViewToTs(ts); return; }
+    _exitReplayAndBrowse(ts);
+    return;
+  }
+  // Live mode: if the object's time is OUTSIDE the loaded window (e.g. a drawing
+  // made during a replay of an old period), a plain scroll can't show it — the
+  // bars aren't loaded, so it clamps to the window edge. Load a bounded window
+  // around it instead (App.browseToTimestamp); the 回到最新 button returns to now.
+  const bars = (window.App && window.App.currentBars) || [];
+  const outside = bars.length && Number.isFinite(ts)
+    && (ts < bars[0].timestamp || ts > bars[bars.length - 1].timestamp);
+  if (outside && window.App && window.App.browseToTimestamp) {
+    window.App.browseToTimestamp(ts);
+    return;
+  }
+  _jumpChartToTimestamp(Drawing.chart, ts);
+  _syncMiniToTs(ts);   // the mini shares the data but not the programmatic scroll
+}
+Drawing.jumpToOverlay = jumpToOverlay;
+
+// Bring the open mini chart to `ts` too. The mini shares the main's data
+// (Replay.displayBars / App.currentBars) but only mirrors the main via scroll
+// DELTA events — a programmatic scrollToDataIndex does NOT fire those, so the
+// mini wouldn't follow a jump (its K-line stays put / looks unloaded). Compute
+// the mini's own index for ts and scroll it there; refreshData first in case its
+// data went stale.
+function _syncMiniToTs(ts) {
+  const MC = window.MiniChart;
+  if (!MC || !MC.chart || !MC.el || MC.el.hidden || !MC.chart.scrollToDataIndex || !Number.isFinite(ts)) return;
+  try { if (MC.refreshData) MC.refreshData(); } catch (e) {}
+  const bars = (MC.chart.getDataList && MC.chart.getDataList()) || [];
+  if (!bars.length) return;
+  const idx = findDataIndexByTimestamp(bars, ts);
+  const vr = MC.chart.getVisibleRange ? MC.chart.getVisibleRange() : null;
+  const width = vr ? Math.max(10, vr.to - vr.from) : 60;
+  try { MC.chart.scrollToDataIndex(Math.round(idx + width / 2), 0); } catch (e) {}
+}
+Drawing._syncMiniToTs = _syncMiniToTs;
+
+// Object is at a bar the replay hasn't reached (or before the loaded window) →
+// its K-bars are placeholders/unloaded. Exit replay, then load a bounded window
+// around it in live mode so the K-line + the object actually render.
+async function _exitReplayAndBrowse(ts) {
+  try { if (window.Replay && window.Replay.exit) await window.Replay.exit(); } catch (e) {}
+  if (window.App && window.App.browseToTimestamp) {
+    try { await window.App.browseToTimestamp(ts); } catch (e) {}
+  } else {
+    _jumpChartToTimestamp(Drawing.chart, ts);
+  }
+}
+
+// Replay VIEW-ONLY scroll to `ts`: centre the object but clamp the right edge to
+// just past the cursor (the last REAL bar) so the view never scrolls into the
+// placeholder zone — that overshoot was what stretched/compressed the K-bars.
+// Does NOT move the replay cursor (pure navigation, no record impact).
+function _scrollReplayViewToTs(ts) {
+  const chart = Drawing.chart, R = window.Replay;
+  if (!chart || !chart.scrollToDataIndex || !Number.isFinite(ts)) return;
+  const bars = (chart.getDataList && chart.getDataList()) || [];
+  if (!bars.length) return;
+  const objIdx = findDataIndexByTimestamp(bars, ts);
+  const cursorIdx = (R && Number.isFinite(R.cursorBarIdx)) ? R.cursorBarIdx : bars.length - 1;
+  const vr = chart.getVisibleRange ? chart.getVisibleRange() : null;
+  const width = vr ? Math.max(10, vr.to - vr.from) : 60;
+  const target = Math.min(objIdx + Math.floor(width / 2), cursorIdx + 5);
+  try { chart.scrollToDataIndex(target, 0); } catch (e) {}
+  _syncMiniToTs(ts);   // the mini shares the data but not the programmatic scroll
+}
+
+// Lightweight object-tree row context menu. `items` = [{ label, onClick }] —
+// currently 設定… (opens the same settings dialog as the canvas right-click) and
+// 跳轉至該物件位置.
+function _hideTreeCtxMenu() {
+  const m = document.getElementById('obj-tree-ctx');
+  if (m) m.remove();
+}
+function _showTreeCtxMenu(pageX, pageY, items) {
+  _hideTreeCtxMenu();
+  const menu = document.createElement('div');
+  menu.id = 'obj-tree-ctx';
+  for (const it of items) {
+    const item = document.createElement('div');
+    item.className = 'ctx-item';
+    item.textContent = it.label;
+    item.addEventListener('click', () => { _hideTreeCtxMenu(); it.onClick(); });
+    menu.appendChild(item);
+  }
+  document.body.appendChild(menu);
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.min(pageX, window.innerWidth - w - 6) + 'px';
+  menu.style.top = Math.min(pageY, window.innerHeight - h - 6) + 'px';
+  setTimeout(() => {
+    document.addEventListener('click', _hideTreeCtxMenu, { capture: true, once: true });
+    document.addEventListener('contextmenu', _hideTreeCtxMenu, { capture: true, once: true });
+    window.addEventListener('blur', _hideTreeCtxMenu, { once: true });
+  }, 0);
 }
 
 // =================================================================
@@ -555,6 +1008,46 @@ function _newFiboExtendData() {
     fibo: JSON.parse(JSON.stringify(FIBO_CONFIG_DEFAULTS)),
     levels: JSON.parse(JSON.stringify(FIBO_LEVEL_DEFAULTS)),
   };
+}
+
+// Last-used fibo config (levels/colours/reverse/background-on-off/etc),
+// persisted so the NEXT fibo the user draws inherits whatever they last set up —
+// via the settings panel OR by applying a template (Aaron's request). Falls back
+// to the built-in defaults when nothing has been used yet.
+//
+// PER-FAMILY: fibo_time keeps its OWN last-used store, separate from the price
+// fibos (retrace/extension). So editing a fibo_time's colours/background never
+// bleeds into a new price fibo (and vice-versa), and a brand-new fibo_time with
+// no history still falls back to the built-in defaults — never the Wister-tuned
+// price-fibo config.
+const _FIBO_LAST_USED_KEY      = 'chart_viewer.fibo_last_used';
+const _FIBO_TIME_LAST_USED_KEY = 'chart_viewer.fibo_time_last_used';
+function _fiboLastUsedKey(overlayName) {
+  return overlayName === 'fibo_time' ? _FIBO_TIME_LAST_USED_KEY : _FIBO_LAST_USED_KEY;
+}
+function _saveLastUsedFibo(fibo, levels, overlayName) {
+  if (!fibo || !levels) return;
+  try { localStorage.setItem(_fiboLastUsedKey(overlayName), JSON.stringify({ fibo, levels })); } catch (e) {}
+}
+function _fiboExtendForNew(overlayName) {
+  try {
+    const raw = localStorage.getItem(_fiboLastUsedKey(overlayName));
+    if (raw) {
+      const o = JSON.parse(raw);
+      if (o && o.fibo && Array.isArray(o.levels)) {
+        return { fibo: JSON.parse(JSON.stringify(o.fibo)), levels: JSON.parse(JSON.stringify(o.levels)) };
+      }
+    }
+  } catch (e) { /* fall through to defaults */ }
+  return _newFiboExtendData();
+}
+Drawing._fiboExtendForNew = _fiboExtendForNew;
+Drawing._saveLastUsedFibo = _saveLastUsedFibo;
+
+// Seed a freshly-drawn fibo from its family's last-used config (built-in
+// defaults on first use). fibo_time reads its own store, price fibos read theirs.
+function _fiboSeedFor(overlayName) {
+  return _fiboExtendForNew(overlayName);
 }
 
 function _fiboConfigOf(overlay) {
@@ -1213,25 +1706,36 @@ function _buildPositionFigures(coordinates, overlay, side) {
 
 // Auto-fill target & stop after the user's single click. Called from setTool's
 // onDrawEnd hook for long/short position overlays.
-function _autoFillPositionPoints(overlay, side) {
+function _autoFillPositionPoints(overlay, side, chart) {
   if (!overlay || !overlay.points || overlay.points.length === 0) return;
+  // Chart the position was dropped on (main by default; the mini when a
+  // position is drawn there). All geometry + the overrideOverlay must target
+  // THIS chart, else a mini position's target/stop auto-fill silently no-ops
+  // against a non-existent main-chart id.
+  chart = chart || Drawing.chart;
   const entry = overlay.points[0];
   const entryPrice = entry.value;
   const entryTs = entry.timestamp;
 
-  // Default offset: 0.5% of entry price (matches the "default 1:1 R:R" the user
-  // expects from a fresh position drop). Symmetric → R:R = 1.
+  // Sizing: reuse the last RR-applied point distances (so a fresh position
+  // inherits the stop/target the user last dialed in via 依停損設定目標 /
+  // 依目標設定停損). Falls back to a symmetric 0.5%-of-entry offset (= R:R 1)
+  // when nothing has been remembered yet.
   const offset = Math.max(Math.abs(entryPrice) * 0.005, 1);
+  const remembered = _loadLastPositionSizing();
+  const stopPts   = (remembered && remembered.stopPoints   > 0) ? remembered.stopPoints   : offset;
+  const targetPts = (remembered && remembered.targetPoints > 0) ? remembered.targetPoints : offset;
 
   // Long: target above entry, stop below. Short flips.
-  const targetPrice = side === 'long' ? entryPrice + offset : entryPrice - offset;
-  const stopPrice   = side === 'long' ? entryPrice - offset : entryPrice + offset;
+  const targetPrice = side === 'long' ? entryPrice + targetPts : entryPrice - targetPts;
+  const stopPrice   = side === 'long' ? entryPrice - stopPts   : entryPrice + stopPts;
 
   // Box right-edge timestamp = ~30% of visible bar count to the right.
-  const bars = (window.App && window.App.currentBars) || [];
+  const bars = (chart && chart.getDataList && chart.getDataList())
+    || (window.App && window.App.currentBars) || [];
   let rightTs = entryTs;
   try {
-    const vis = Drawing.chart && Drawing.chart.getVisibleRange && Drawing.chart.getVisibleRange();
+    const vis = chart && chart.getVisibleRange && chart.getVisibleRange();
     if (vis) {
       const visW = (vis.to - vis.from) || 50;
       const widthBars = Math.max(10, Math.round(visW * 0.3));
@@ -1276,7 +1780,7 @@ function _autoFillPositionPoints(overlay, side) {
     { timestamp: entryTs, value: stopPrice },
   ];
   try {
-    Drawing.chart.overrideOverlay({
+    chart.overrideOverlay({
       id: overlay.id,
       points: newPoints,
       extendData: { ...(overlay.extendData || {}), position: positionParams },
@@ -1288,6 +1792,155 @@ function _autoFillPositionPoints(overlay, side) {
   }
 }
 Drawing._autoFillPositionPoints = _autoFillPositionPoints;
+
+// Last RR-applied position sizing (stop/target distances in price points),
+// persisted so the NEXT freshly-dropped position inherits the same points —
+// same idea as the fibo last-used config. Global (not per-symbol), matching
+// the fibo pattern; distances are absolute price points.
+const _POSITION_LAST_RR_KEY = 'chart_viewer.position_last_rr';
+function _saveLastPositionSizing(stopPoints, targetPoints) {
+  if (!(stopPoints > 0) || !(targetPoints > 0)) return;
+  try { localStorage.setItem(_POSITION_LAST_RR_KEY, JSON.stringify({ stopPoints, targetPoints })); } catch (e) {}
+}
+function _loadLastPositionSizing() {
+  try {
+    const o = JSON.parse(localStorage.getItem(_POSITION_LAST_RR_KEY) || 'null');
+    if (o && o.stopPoints > 0 && o.targetPoints > 0) return o;
+  } catch (e) {}
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Set target-from-stop (or stop-from-target) by a risk/reward ratio.
+// Right-click a position box → 依停損設定目標 / 依目標設定停損 → RrPopup asks
+// for an R:R, and we recompute the chosen leg keeping entry + the OTHER leg
+// fixed. Direction is derived from the price geometry, so it's long/short
+// agnostic:
+//   RR = |target − entry| / |entry − stop|
+//   set-target: newTarget = entry + (entry − stop) × RR
+//   set-stop:   newStop   = entry − (target − entry) / RR
+// Points layout mirrors _buildPositionFigures: 4-pt = [entry, entryR, target,
+// stop]; legacy 3-pt = [entry, target, stop].
+function _positionRRIdx(pts) {
+  const fourPt = pts.length >= 4;
+  return { targetIdx: fourPt ? 2 : 1, stopIdx: fourPt ? 3 : 2 };
+}
+function _currentPositionRR(overlay) {
+  const pts = overlay && overlay.points;
+  if (!pts || pts.length < 3) return null;
+  const { targetIdx, stopIdx } = _positionRRIdx(pts);
+  const entry = pts[0].value, target = pts[targetIdx].value, stop = pts[stopIdx].value;
+  const sp = Math.abs(entry - stop);
+  if (!(sp > 0) || !Number.isFinite(target)) return null;
+  return Math.abs(target - entry) / sp;
+}
+// Pure — returns { idx, newValue } for the leg to move, or null.
+function _positionRRResult(overlay, mode, rr) {
+  const pts = overlay && overlay.points;
+  if (!pts || pts.length < 3) return null;
+  const { targetIdx, stopIdx } = _positionRRIdx(pts);
+  const entry = pts[0].value;
+  if (!Number.isFinite(entry) || !Number.isFinite(rr) || rr <= 0) return null;
+  if (mode === 'stop') {
+    const target = pts[targetIdx].value;
+    if (!Number.isFinite(target)) return null;
+    return { idx: stopIdx, newValue: entry - (target - entry) / rr };
+  }
+  const stop = pts[stopIdx].value;
+  if (!Number.isFinite(stop)) return null;
+  return { idx: targetIdx, newValue: entry + (entry - stop) * rr };
+}
+function _applyPositionRR(overlay, mode, rr) {
+  const res = _positionRRResult(overlay, mode, rr);
+  if (!res) return;
+  const chart = _chartOf(overlay.id) || Drawing.chart;
+  const before = overlay.points.map(p => ({ ...p }));
+  const after  = before.map(p => ({ ...p }));
+  after[res.idx] = { ...after[res.idx], value: res.newValue };
+  const commit = (arr) => {
+    overlay.points = arr.map(p => ({ ...p }));
+    try { chart.overrideOverlay({ id: overlay.id, points: overlay.points }); } catch (e) {}
+    updateTrackedOverlay(overlay.id, { points: overlay.points });
+  };
+  commit(after);
+  // Remember this sizing so the next new position inherits the same points.
+  const pts = overlay.points;
+  const { targetIdx, stopIdx } = _positionRRIdx(pts);
+  const e2 = pts[0].value;
+  _saveLastPositionSizing(Math.abs(e2 - pts[stopIdx].value), Math.abs(e2 - pts[targetIdx].value));
+  pushUndo({ label: 'position R:R', undo: () => commit(before), redo: () => commit(after) });
+}
+
+// TradingView-style R:R input popup — mirrors the tf-popup (app.js) behaviour:
+// big centred input, Enter commits, Esc / click-outside cancels. Reuses the
+// tf-popup CSS classes. Digit + single '.' buffer (R:R may be fractional).
+const RrPopup = {
+  buffer: '', overlay: null, mode: 'target',
+  _t(k, f) { return (window.I18n && window.I18n.t) ? (window.I18n.t(k) || f) : f; },
+  open(overlay, mode) {
+    if (!overlay) return;
+    this.overlay = overlay;
+    this.mode = mode === 'stop' ? 'stop' : 'target';
+    const rr = _currentPositionRR(overlay);
+    this.buffer = (rr && Number.isFinite(rr)) ? String(Math.round(rr * 100) / 100) : '';
+    const titleEl = document.getElementById('rr-popup-title');
+    if (titleEl) titleEl.textContent = this.mode === 'target'
+      ? this._t('dlg.rrPopupTitleTarget', '依停損設定目標')
+      : this._t('dlg.rrPopupTitleStop', '依目標設定停損');
+    const pop = document.getElementById('rr-popup');
+    if (pop) pop.classList.remove('hidden');
+    this.render();
+  },
+  hide() {
+    const pop = document.getElementById('rr-popup');
+    if (pop) { pop.classList.add('hidden'); pop.classList.remove('invalid'); }
+    this.buffer = ''; this.overlay = null;
+  },
+  isOpen() {
+    const pop = document.getElementById('rr-popup');
+    return !!pop && !pop.classList.contains('hidden');
+  },
+  render() {
+    const pop = document.getElementById('rr-popup');
+    if (!pop) return;
+    const rr = parseFloat(this.buffer);
+    const valid = this.buffer !== '' && Number.isFinite(rr) && rr > 0;
+    pop.classList.toggle('invalid', !valid);
+    const inp = document.getElementById('rr-popup-input');
+    if (inp) inp.textContent = this.buffer || '';
+    const subEl = document.getElementById('rr-popup-sub');
+    if (!subEl) return;
+    if (valid && this.overlay) {
+      const res = _positionRRResult(this.overlay, this.mode, rr);
+      if (res) {
+        const lbl = this.mode === 'target'
+          ? this._t('dlg.rrTargetLabel', '目標')
+          : this._t('dlg.rrStopLabel', '停損');
+        subEl.textContent = `RR ${Math.round(rr * 100) / 100} → ${lbl} ${res.newValue.toFixed(2)}`;
+        return;
+      }
+    }
+    subEl.textContent = this._t('dlg.rrHint', '風報比（大於 0）');
+  },
+  commit() {
+    const rr = parseFloat(this.buffer);
+    if (!Number.isFinite(rr) || rr <= 0) return;
+    _applyPositionRR(this.overlay, this.mode, rr);
+    this.hide();
+  },
+  // Registered in CAPTURE phase so it beats app.js's bubble-phase keydown
+  // (which would otherwise open the tf-popup / symbol search on a digit).
+  handleKey(e) {
+    if (!this.isOpen()) return;
+    if (e.key === 'Enter')     { this.commit(); e.preventDefault(); e.stopPropagation(); return; }
+    if (e.key === 'Escape')    { this.hide();   e.preventDefault(); e.stopPropagation(); return; }
+    if (e.key === 'Backspace') { this.buffer = this.buffer.slice(0, -1); this.render(); e.preventDefault(); e.stopPropagation(); return; }
+    if (/^[0-9]$/.test(e.key)) { this.buffer += e.key; this.render(); e.preventDefault(); e.stopPropagation(); return; }
+    if (e.key === '.' && !this.buffer.includes('.')) { this.buffer += '.'; this.render(); e.preventDefault(); e.stopPropagation(); return; }
+    e.stopPropagation();   // swallow the rest so no other popup hijacks focus
+  },
+};
+Drawing.RrPopup = RrPopup;
 
 // While the user is dragging one of the 4 default-point handles on a long/
 // short position, axis-lock per-handle:
@@ -1349,6 +2002,16 @@ function refreshPositionOverlays() {
         // Empty patch is enough — KLineChart re-runs createPointFigures.
         Drawing.chart.overrideOverlay({ id });
       } catch (e) { /* ignore */ }
+    }
+  }
+  // Mini-drawn positions live on the mini chart + _miniRegistry — refresh them
+  // on their own chart so a PositionConfig save updates Qty/P/L there too.
+  const miniChart = window.MiniChart && window.MiniChart.chart;
+  if (miniChart && Drawing._miniRegistry) {
+    for (const e of Drawing._miniRegistry.values()) {
+      if ((e.name === 'long_position' || e.name === 'short_position') && e._ovid) {
+        try { miniChart.overrideOverlay({ id: e._ovid }); } catch (err) { /* ignore */ }
+      }
     }
   }
 }
@@ -1430,6 +2093,93 @@ function _measureArrowHead(tipX, tipY, dir, size) {
     case 'down':  return [{ x: tipX, y: tipY }, { x: tipX - w, y: tipY - size }, { x: tipX + w, y: tipY - size }];
   }
   return [];
+}
+
+// ---- Curve (曲線) geometry helpers ----
+// Sample a quadratic Bézier P0→C→P2 into `n` segments (n+1 points). The curve
+// tool stores 3 handles: start, APEX (on the curve), end. We want the drawn
+// curve to pass THROUGH the apex M at t=0.5, so the Bézier control point is
+// C = 2M − (P0+P2)/2 (solving B(0.5)=M).
+function _curveControl(p0, m, p2) {
+  return { x: 2 * m.x - (p0.x + p2.x) / 2, y: 2 * m.y - (p0.y + p2.y) / 2 };
+}
+function _sampleQuadratic(p0, c, p2, n) {
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, u = 1 - t;
+    pts.push({
+      x: u * u * p0.x + 2 * u * t * c.x + t * t * p2.x,
+      y: u * u * p0.y + 2 * u * t * c.y + t * t * p2.y,
+    });
+  }
+  return pts;
+}
+// Tangent (unit vector) of the quadratic at t∈{0,1}: B'(t)=2(1-t)(C-P0)+2t(P2-C).
+function _curveTangent(p0, c, p2, t) {
+  const dx = 2 * (1 - t) * (c.x - p0.x) + 2 * t * (p2.x - c.x);
+  const dy = 2 * (1 - t) * (c.y - p0.y) + 2 * t * (p2.y - c.y);
+  const len = Math.hypot(dx, dy) || 1;
+  return { x: dx / len, y: dy / len };
+}
+// Triangle arrowhead with tip at (tx,ty) pointing along unit vector (ux,uy).
+function _curveArrowHead(tx, ty, ux, uy, size) {
+  const w = size * 0.55;
+  const bx = tx - ux * size, by = ty - uy * size;   // base center behind the tip
+  const nx = -uy, ny = ux;                          // perpendicular
+  return [{ x: tx, y: ty }, { x: bx + nx * w, y: by + ny * w }, { x: bx - nx * w, y: by - ny * w }];
+}
+
+// Selection handles (blue anchor dots) emitted from createPointFigures when the
+// overlay is the selected one. KLineChart's own default point figures only show
+// on a CANVAS selection, so overlays that rely on them (curve / trendline /
+// position) render NO handles when selected from the object tree. These match the
+// default handle style + sit on the same anchor coordinates, so on a canvas click
+// the two overlap invisibly, while a tree click still shows them. `ignoreEvent`
+// keeps them out of hit-testing (the real draggable handles are KLineChart's).
+function _selectionHandleFigures(coordinates) {
+  return (coordinates || [])
+    .filter(c => c && Number.isFinite(c.x) && Number.isFinite(c.y))
+    .map(c => ({
+      type: 'circle', ignoreEvent: true,
+      attrs: { x: c.x, y: c.y, r: 4 },
+      styles: { style: 'stroke_fill', color: '#2962ff', borderColor: '#fff', borderSize: 1 },
+    }));
+}
+
+// Curve is drawn with 2 clicks (A=start, C=end); this seeds the middle apex B so
+// the curve is BORN with a bow (never a straight line). B sits at the chord
+// midpoint pushed perpendicular (downward on screen) by a fraction of the chord
+// length, computed in PIXEL space so the bow looks consistent at any scale, then
+// converted back to a data point. The user drags B afterwards to reshape.
+function _seedCurveApex(a, c, chart) {
+  // Compute the bow in the TARGET chart's pixel space (default main). Passing
+  // the mini chart lets the curve tool auto-seed the apex on the mini too, so a
+  // mini curve is 2-click (A,C)+bow just like the main — not native 3-click.
+  chart = chart || Drawing.chart;
+  if (!chart) return null;
+  try {
+    const toPx = (p) => {
+      const out = chart.convertToPixel([{ timestamp: p.timestamp, dataIndex: p.dataIndex, value: p.value }], { paneId: 'candle_pane' });
+      return Array.isArray(out) ? out[0] : out;
+    };
+    const pa = toPx(a), pc = toPx(c);
+    if (!pa || !pc || !Number.isFinite(pa.x) || !Number.isFinite(pc.x)) return null;
+    const dx = pc.x - pa.x, dy = pc.y - pa.y;
+    const len = Math.hypot(dx, dy) || 1;
+    let px = -dy / len, py = dx / len;                 // unit perpendicular
+    if (py < 0) { px = -px; py = -py; }                // bow downward (screen +y)
+    const bow = Math.min(120, Math.max(34, len * 0.22));
+    const mx = (pa.x + pc.x) / 2 + px * bow;
+    const my = (pa.y + pc.y) / 2 + py * bow;
+    const out = chart.convertFromPixel({ x: mx, y: my }, { paneId: 'candle_pane' });
+    const b = Array.isArray(out) ? out[0] : out;
+    if (!b || !Number.isFinite(b.value)) return null;
+    const apex = { value: b.value };
+    if (Number.isFinite(b.dataIndex)) apex.dataIndex = b.dataIndex;
+    if (Number.isFinite(b.timestamp)) apex.timestamp = b.timestamp;
+    else if (Number.isFinite(a.timestamp) && Number.isFinite(c.timestamp)) apex.timestamp = (a.timestamp + c.timestamp) / 2;
+    return [a, apex, c];
+  } catch (e) { return null; }
 }
 
 // Build the 3-line stats text for a measure overlay. Values are signed based
@@ -1810,6 +2560,101 @@ function registerOverlays() {
               color: ghostColor, hAlign: 'center', vPos: 'inside' }));
         }
       }
+      // Selection handles at both endpoints so a tree-click shows the trendline
+      // as selected (KLineChart's default handles only appear on a canvas click).
+      if (isSelected) figs.push(..._selectionHandleFigures([coordinates[0], coordinates[1]]));
+      return figs;
+    },
+    performEventMoveForDrawing: applySnap,
+    performEventPressedMove: (event) => { setGlobalCursor('grabbing'); applySnap(event); },
+    ...overlayInteractions,
+  });
+
+  // ----- Curve (曲線) — 3 points: start, apex, end -----
+  // A quadratic Bézier that passes THROUGH the middle handle (apex). Optional
+  // arrowheads on either end and straight tangent extensions past either end
+  // (TradingView "curve" tool). Params live in extendData.curve:
+  //   { arrowLeft, arrowRight, extendLeft, extendRight }  (all bool, default false)
+  klinecharts.registerOverlay({
+    name: 'curve_snap',
+    totalStep: 4,                       // 3 clicks + finalize
+    needDefaultPointFigure: true,       // draggable handles at each stored point
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    styles: {
+      line: { color: '#2962ff', size: 1, style: 'solid' },
+      point: { color: '#2962ff', borderColor: '#fff', borderSize: 1, radius: 4 },
+    },
+    createPointFigures: ({ coordinates, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const lineStyles = (overlay.styles && overlay.styles.line) || {};
+      const cd = (overlay.extendData && overlay.extendData.curve) || {};
+      const figs = [];
+
+      // Three points → quadratic through the real apex. Two points (mid-draw
+      // preview) → quadratic through a SYNTHETIC bowed apex, so the curve already
+      // shows curvature while dragging A→C (visually distinct from a trendline).
+      // The bow matches _seedCurveApex (pixel space here) so the preview and the
+      // committed 3-point curve line up.
+      let poly, tanStart, tanEnd, pStart, pEnd;
+      let m;
+      if (coordinates.length >= 3) {
+        m = coordinates[1];
+      } else {
+        const [p0, p2] = coordinates;
+        const dx = p2.x - p0.x, dy = p2.y - p0.y, len = Math.hypot(dx, dy) || 1;
+        let nx = -dy / len, ny = dx / len;            // unit perpendicular
+        if (ny < 0) { nx = -nx; ny = -ny; }           // bow downward (screen +y)
+        const bow = Math.min(120, Math.max(34, len * 0.22));
+        m = { x: (p0.x + p2.x) / 2 + nx * bow, y: (p0.y + p2.y) / 2 + ny * bow };
+      }
+      {
+        const p0 = coordinates[0], p2 = coordinates[coordinates.length >= 3 ? 2 : 1];
+        const c = _curveControl(p0, m, p2);
+        poly = _sampleQuadratic(p0, c, p2, 48);
+        tanStart = _curveTangent(p0, c, p2, 0);   // points p0→c
+        tanEnd = _curveTangent(p0, c, p2, 1);     // points c→p2
+        pStart = p0; pEnd = p2;
+      }
+
+      // Wide invisible hit-line through the whole polyline (native line hit-test
+      // is ~3px; give select / right-click / drag a fat surface).
+      const hitSize = Math.max((lineStyles.size || 1) + 10, 14);
+      figs.push({ type: 'line', attrs: { coordinates: poly }, styles: { color: 'rgba(0,0,0,0.001)', size: hitSize, style: 'solid' } });
+
+      // Straight tangent extensions past either end, out to the pane edge.
+      const EXT = 100000;   // long enough to always exit the visible pane
+      if (cd.extendLeft) {
+        figs.push({ type: 'line', styles: lineStyles,
+          attrs: { coordinates: [pStart, { x: pStart.x - tanStart.x * EXT, y: pStart.y - tanStart.y * EXT }] } });
+      }
+      if (cd.extendRight) {
+        figs.push({ type: 'line', styles: lineStyles,
+          attrs: { coordinates: [pEnd, { x: pEnd.x + tanEnd.x * EXT, y: pEnd.y + tanEnd.y * EXT }] } });
+      }
+
+      // The visible curve.
+      figs.push({ type: 'line', attrs: { coordinates: poly }, styles: lineStyles });
+
+      // Arrowheads on the ends (outward-pointing along the tangents).
+      const aSize = Math.max((lineStyles.size || 1) * 3 + 5, 9);
+      const aColor = lineStyles.color || '#2962ff';
+      if (cd.arrowRight) {
+        figs.push({ type: 'polygon',
+          attrs: { coordinates: _curveArrowHead(pEnd.x, pEnd.y, tanEnd.x, tanEnd.y, aSize) },
+          styles: { style: 'fill', color: aColor } });
+      }
+      if (cd.arrowLeft) {
+        figs.push({ type: 'polygon',
+          attrs: { coordinates: _curveArrowHead(pStart.x, pStart.y, -tanStart.x, -tanStart.y, aSize) },
+          styles: { style: 'fill', color: aColor } });
+      }
+      // Selection handles at the 3 real anchors (start / apex / end) so the curve
+      // shows as selected from an object-tree click, not just a canvas click.
+      const isSel = Drawing.selectedOverlay && Drawing.selectedOverlay.id === overlay.id;
+      if (isSel && coordinates.length >= 3) {
+        figs.push(..._selectionHandleFigures([coordinates[0], coordinates[1], coordinates[2]]));
+      }
       return figs;
     },
     performEventMoveForDrawing: applySnap,
@@ -1834,7 +2679,13 @@ function registerOverlays() {
   // Breaks on whitespace when possible; falls back to per-char wrap if a single
   // token is too long (handles narrow rects with long words like "BBOSS").
   // Positions lines based on vPos (top/inside/bottom) × hAlign (left/center/right).
-  function buildRectTextFigures(box, textState) {
+  // wrap=true → soft-wrap each paragraph to the box width (rectangle labels,
+  // and text boxes with 自動換行 ON). wrap=false → keep each explicit line as-is
+  // (text boxes with 自動換行 OFF — the box is auto-sized to fit instead).
+  // insideTop=true (text boxes) anchors the text at the box's TOP-LEFT INSIDE
+  // corner with padding, matching the inline editor. Rectangle/trendline labels
+  // use vPos ('top' renders ABOVE the box, the title convention).
+  function buildRectTextFigures(box, textState, wrap = true, insideTop = false) {
     const t = { ...DEFAULT_TEXT_STATE, ...(textState || {}) };
     if (!t.content) return [];
     const maxWidth = Math.max(8, box.x2 - box.x1 - 8);   // 4px padding each side
@@ -1848,7 +2699,8 @@ function registerOverlays() {
     const lines = [];
     for (const para of t.content.split(/\r?\n/)) {
       if (!para) { lines.push(''); continue; }
-      lines.push(...wrapLine(ctx, para, maxWidth));
+      if (wrap) lines.push(...wrapLine(ctx, para, maxWidth));
+      else      lines.push(para);
     }
 
     const lineHeight = Math.ceil(t.size * 1.2);
@@ -1859,7 +2711,9 @@ function registerOverlays() {
     // a line-height box, so the inline editor and the final rendered label
     // sit on the exact same baseline.
     let firstCenterY;
-    if (t.vPos === 'top') {
+    if (insideTop) {
+      firstCenterY = box.y1 + pad + lineHeight / 2;                 // text box: top-left inside
+    } else if (t.vPos === 'top') {
       firstCenterY = box.y1 - pad - totalH + lineHeight / 2;
     } else if (t.vPos === 'bottom') {
       firstCenterY = box.y2 + pad + lineHeight / 2;
@@ -1891,6 +2745,7 @@ function registerOverlays() {
     });
     return figs;
   }
+
   klinecharts.registerOverlay({
     name: 'rectangle_snap',
     totalStep: 3,
@@ -1915,20 +2770,46 @@ function registerOverlays() {
       const y2 = Math.max(p1.y, p2.y);
       const cx = (x1 + x2) / 2;
       const cy = (y1 + y2) / 2;
-      const figures = [
-        { type: 'rect', attrs: { x: x1, y: y1, width: x2 - x1, height: y2 - y1 },
-          styles: (overlay.styles && overlay.styles.rect) || {} },
-      ];
-      // Text label (wraps to rect width). Stored in extendData.text.
-      // While THIS rect is in inline-edit mode, skip both text and placeholder
-      // rendering — the overlay textarea owns the display.
-      const textState = overlay.extendData && overlay.extendData.text;
+      const ed = overlay.extendData || {};
+      const isTextBox = !!ed.textBox;
+      const textState = ed.text;
       const isDrawing = Drawing.drawingId === overlay.id;
       const isSelected = Drawing.selectedOverlay && Drawing.selectedOverlay.id === overlay.id;
       const isEditing = _rectEditingId === overlay.id;
+
+      const figures = [];
+      // A text box draws its background/border only when the user opts in
+      // (extendData.bgEnabled / borderEnabled); by default it's just text.
+      // A normal rectangle always draws its rect (unchanged path).
+      if (!isTextBox) {
+        figures.push({ type: 'rect', attrs: { x: x1, y: y1, width: x2 - x1, height: y2 - y1 },
+          styles: (overlay.styles && overlay.styles.rect) || {} });
+      } else {
+        const bgOn = !!ed.bgEnabled, bdOn = !!ed.borderEnabled;
+        // ALWAYS draw a fill rect — with a transparent color when the user hasn't
+        // enabled a background. A transparent FILL is invisible but still
+        // hit-tested (checkEventOn is geometric), so the whole text box body is
+        // clickable / right-clickable and click-away can deselect it. Without
+        // this, a no-background text box has no canvas target at all and is only
+        // reachable through the object tree (Aaron's report).
+        figures.push({ type: 'rect', attrs: { x: x1, y: y1, width: x2 - x1, height: y2 - y1 },
+          styles: {
+            style: bdOn ? 'stroke_fill' : 'fill',
+            color: bgOn ? hexToRgba((ed.bgColor && ed.bgColor.hex) || '#1e222d',
+                                    ed.bgColor ? ed.bgColor.opacity : 0.85) : 'transparent',
+            borderColor: bdOn ? hexToRgba((ed.borderColor && ed.borderColor.hex) || '#2962ff',
+                                          ed.borderColor ? ed.borderColor.opacity : 1) : 'transparent',
+            borderSize: 1,
+          } });
+      }
+      // Text label. For a text box the wrap flag comes from extendData.wrap;
+      // rectangle labels always wrap to the box width. Stored in extendData.text.
+      // While THIS overlay is in inline-edit mode, skip text + placeholder — the
+      // textarea owns the display.
+      const wrapText = isTextBox ? !!ed.wrap : true;
       if (!isEditing) {
         if (textState && textState.content) {
-          figures.push(...buildRectTextFigures({ x1, y1, x2, y2 }, textState));
+          figures.push(...buildRectTextFigures({ x1, y1, x2, y2 }, textState, wrapText, isTextBox));
         } else if (isSelected) {
           const base = textState || DEFAULT_TEXT_STATE;
           const ghostColor = { ...(base.color || DEFAULT_TEXT_STATE.color) };
@@ -1936,7 +2817,7 @@ function registerOverlays() {
           const _addText = (window.I18n && window.I18n.t)
             ? window.I18n.t('tool.addText') : '+ 新增文字';
           figures.push(...buildRectTextFigures({ x1, y1, x2, y2 },
-            { ...DEFAULT_TEXT_STATE, ...base, content: _addText, color: ghostColor }));
+            { ...DEFAULT_TEXT_STATE, ...base, content: _addText, color: ghostColor }, wrapText, isTextBox));
         }
       }
       if (isDrawing || isSelected) {
@@ -2399,6 +3280,92 @@ function registerOverlays() {
     return figures;
   }
 
+  // Trend-Based Fib TIME — the time-axis analogue of the trend-based fib
+  // extension. 3 points: #1→#2 define a reference TIME interval (a wave's
+  // duration), #3 is the projection origin. We draw VERTICAL lines at fib
+  // ratios of that interval projected forward in time (X axis), so the user
+  // reads "time 1:1 / 1.618 …" the way the price extension reads price ratios.
+  // Projection is done in PIXEL space (bar spacing is uniform) so it re-derives
+  // correctly on every scroll/zoom. Reuses the fibo config (levels/colors/
+  // background/reverse) so FiboSettings edits it too.
+  // Real pane pixel height for the full-height vertical lines. KLineChart's
+  // `bounding` here is normally the candle-pane bounding, but some render paths
+  // pass the overlay's own (tiny) bbox instead — trust it only when it looks
+  // pane-sized, else read the chart element. Using a real height (not a huge
+  // constant) keeps KLineChart's re-render after overrideOverlay happy — an
+  // absurd coordinate made the whole overlay vanish on a colour/background edit.
+  function _fiboTimePaneHeight(bounding) {
+    const h = bounding && bounding.height;
+    if (Number.isFinite(h) && h > 60) return h;
+    try { const el = document.getElementById('chart'); if (el && el.clientHeight > 0) return el.clientHeight; } catch (e) {}
+    return 800;
+  }
+  function buildFiboTimeFigures({ overlay, coordinates, bounding }) {
+    if (!coordinates || coordinates.length < 1) return [];
+    const config = _fiboConfigOf(overlay);
+    const fibo   = config.fibo || FIBO_CONFIG_DEFAULTS;
+    const levels = config.levels || FIBO_LEVEL_DEFAULTS;
+    const figures = [];
+
+    // Before all 3 points: just show the connector so the reference leg shows.
+    if (coordinates.length < 3) {
+      if (coordinates.length >= 2 && fibo.trendLineColor) {
+        figures.push({ type: 'line', attrs: { coordinates: [coordinates[0], coordinates[1]] },
+          styles: { color: fibo.trendLineColor, size: 1, style: fibo.trendLineStyle || 'dashed' } });
+      }
+      return figures;
+    }
+
+    const [p1, p2, p3] = coordinates;
+    const dxUnit = p2.x - p1.x;                  // one "1.0" time unit, in pixels
+    const sign = fibo.reverse ? -1 : 1;
+    // Full-height vertical lines, using the real pane pixel height (y=0 is the
+    // pane top in this coordinate space).
+    const top = 0;
+    const bot = _fiboTimePaneHeight(bounding);
+    const labelY = 2;                            // label pinned near the pane top
+    const xAt = (r) => p3.x + sign * r * dxUnit;
+
+    // Construction connectors #1→#2→#3 (dashed).
+    if (fibo.trendLineColor) {
+      figures.push({ type: 'line', attrs: { coordinates: [p1, p2] },
+        styles: { color: fibo.trendLineColor, size: 1, style: fibo.trendLineStyle || 'dashed' } });
+      figures.push({ type: 'line', attrs: { coordinates: [p2, p3] },
+        styles: { color: fibo.trendLineColor, size: 1, style: fibo.trendLineStyle || 'dashed' } });
+    }
+
+    const enabled = levels.filter(L => L.on);
+    if (!enabled.length) return figures;
+    const sorted = enabled.slice().sort((a, b) => a.r - b.r);
+
+    // Background bands between consecutive vertical lines.
+    if (fibo.showBackground && sorted.length >= 2) {
+      for (let i = 0; i < sorted.length - 1; i++) {
+        const x0 = xAt(sorted[i].r), x1 = xAt(sorted[i + 1].r);
+        const color = fibo.singleColor || sorted[i].color;
+        figures.push({ type: 'rect',
+          attrs: { x: Math.min(x0, x1), y: top, width: Math.abs(x1 - x0), height: bot - top },
+          styles: { style: 'fill', color: _hexToRgba(color, fibo.backgroundAlpha) } });
+      }
+    }
+
+    // Vertical lines + ratio labels (label sits at the top of each line).
+    for (const L of enabled) {
+      const x = xAt(L.r);
+      const color = fibo.singleColor || L.color;
+      figures.push({ type: 'line', attrs: { coordinates: [{ x, y: top }, { x, y: bot }] },
+        styles: { color, size: 1, style: fibo.hLineStyle || 'solid' } });
+      // Label sits BESIDE the line (a few px to its right), not centered on it —
+      // matches TradingView, where the vertical line doesn't cut through the text.
+      figures.push({ type: 'text',
+        attrs: { x: x + 4, y: labelY, text: `${L.r}`, align: 'left', baseline: 'top' },
+        styles: { color, size: 12, family: 'system-ui,-apple-system,sans-serif',
+          backgroundColor: 'transparent', borderColor: 'transparent', borderSize: 0,
+          paddingLeft: 0, paddingRight: 0, paddingTop: 0, paddingBottom: 0 } });
+    }
+    return figures;
+  }
+
   klinecharts.registerOverlay({
     name: 'fibo_retrace',
     totalStep: 3,                   // 2 clicks + finalize
@@ -2428,6 +3395,20 @@ function registerOverlays() {
     styles: { point: { color: '#2962ff', borderColor: '#fff', borderSize: 1, radius: 4 } },
     createPointFigures: ({ coordinates, overlay, bounding }) =>
       buildFiboFigures({ overlay, coordinates, bounding, kind: 'extension' }),
+    performEventMoveForDrawing: applySnap,
+    performEventPressedMove: (event) => { setGlobalCursor('grabbing'); applySnap(event); },
+    ...overlayInteractions,
+  });
+
+  klinecharts.registerOverlay({
+    name: 'fibo_time',
+    totalStep: 4,                   // 3 clicks + finalize (like fibo_extension)
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    styles: { point: { color: '#2962ff', borderColor: '#fff', borderSize: 1, radius: 4 } },
+    createPointFigures: ({ coordinates, overlay, bounding }) =>
+      buildFiboTimeFigures({ overlay, coordinates, bounding }),
     performEventMoveForDrawing: applySnap,
     performEventPressedMove: (event) => { setGlobalCursor('grabbing'); applySnap(event); },
     ...overlayInteractions,
@@ -2519,8 +3500,14 @@ function applySnap(event) {
 // next click. On right-click finalize, drop that trailing preview so the saved
 // path matches the user's actual left-clicks only.
 function finalizeInProgressPath() {
-  if (!Drawing.chart || !Drawing.drawingId) return;
-  const id = Drawing.drawingId;
+  // Which chart the in-progress path lives on — set per point in
+  // _handleDrawMousedown (null → main). Lets right-click / dblclick / Esc
+  // finalize a path drawn on the mini onto the mini, not the main chart.
+  const host = Drawing._pathHost || 'main';
+  const isMini = host === 'mini';
+  const chart = isMini ? (window.MiniChart && window.MiniChart.chart) : Drawing.chart;
+  const id = isMini ? Drawing._miniDrawId : Drawing.drawingId;
+  if (!chart || !id) return;
   let pts = (Drawing.drawingPoints || []).filter(p => p && Number.isFinite(p.value));
 
   // Drop trailing preview point (the one tracking the cursor that's about to become
@@ -2531,8 +3518,8 @@ function finalizeInProgressPath() {
   if (hasPreview && pts.length > 0) pts = pts.slice(0, -1);
 
   // Always remove the in-progress overlay from KLineChart (resets its drawing state)
-  try { Drawing.chart.removeOverlay({ id }); } catch (e) { /* ignore */ }
-  Drawing.drawingId = null;
+  try { chart.removeOverlay({ id }); } catch (e) { /* ignore */ }
+  if (isMini) Drawing._miniDrawId = null; else Drawing.drawingId = null;
   Drawing.drawingPoints = [];
 
   // Re-create as a completed static overlay (path_done has totalStep:1 → never re-enters draw mode)
@@ -2551,14 +3538,20 @@ function finalizeInProgressPath() {
         if (inherit.extendData) opts.extendData = inherit.extendData;
       }
     }
-    const newId = Drawing.chart.createOverlay(opts);
+    const newId = chart.createOverlay(opts);
     if (typeof newId === 'string') {
+      // Route trackOverlay to the right registry (main vs _miniRegistry).
+      if (isMini) Drawing._drawHost = 'mini';
       trackOverlay({ id: newId, name: 'path_done', points: pts, styles: opts.styles, extendData: opts.extendData });
+      if (isMini) Drawing._drawHost = 'main';
     }
   }
   _continuePathStyles = null;
   _continuePathExtendData = null;
   _continuePathInitialLen = 0;
+  Drawing._pathHost = null;
+  // Drop the OTHER chart's still-armed in-progress path (setTool arms both).
+  _cancelDrawOnOtherChart(host);
   refreshObjectTree();
 }
 
@@ -2800,10 +3793,12 @@ function _startMeasureAtPoint(seedPoint) {
 // buttons handled by the existing .tool-btn[data-tool] selector.
 const _TOOL_GROUP_MAP = {
   trendline:       'trend',
+  curve:           'trend',
   rectangle:       'trend',
   path:            'trend',
   'fibo-retrace':  'fibonacci',
   'fibo-extension':'fibonacci',
+  'fibo-time':     'fibonacci',
   measure:         'forecast',
   'long-position': 'forecast',
   'short-position':'forecast',
@@ -2851,7 +3846,109 @@ function _closeAllToolGroupPopups() {
   document.querySelectorAll('.tool-group-popup').forEach(p => p.classList.add('hidden'));
 }
 
+// Draw target — which chart the active tool draws onto, and which "host"
+// (main / mini) the resulting overlay belongs to. A null target means the
+// main chart. The mini chart's draw entry sets this so a tool can place its
+// overlay on the sub-chart; setTool('cross') resets it back to main.
+Drawing._drawTarget = null;
+Drawing._drawHost = 'main';
+function _targetChart() { return Drawing._drawTarget || Drawing.chart; }
+function setDrawTarget(chart, host) {
+  Drawing._drawTarget = chart || null;
+  Drawing._drawHost = host || 'main';
+}
+Drawing.setDrawTarget = setDrawTarget;
+
+// Tool integration: a tool is armed on BOTH the main and (open) mini chart, so
+// the user draws on whichever one they click into. When one finishes, cancel
+// the other chart's still-pending draw so only one overlay is created.
+function _cancelDrawOnOtherChart(finishedHost) {
+  const miniChart = window.MiniChart && window.MiniChart.chart;
+  if (finishedHost === 'main') {
+    if (Drawing._miniDrawId && miniChart) { try { miniChart.removeOverlay({ id: Drawing._miniDrawId }); } catch (e) {} }
+  } else {
+    if (Drawing._mainDrawId && Drawing.chart) { try { Drawing.chart.removeOverlay({ id: Drawing._mainDrawId }); } catch (e) {} }
+  }
+  Drawing._mainDrawId = null;
+  Drawing._miniDrawId = null;
+}
+
+// ===== Text box tool — single-click placement =====
+// Unlike the other shapes (2-click box / N-point path), the text tool drops a
+// box with ONE click at the top-left, then opens the inline editor immediately
+// (PPT-style). The box auto-sizes to the text on commit (see _autoSizeTextBox).
+let _textPlacementCleanup = null;
+function _cancelTextPlacement() {
+  if (_textPlacementCleanup) { _textPlacementCleanup(); _textPlacementCleanup = null; }
+}
+function _placeTextBoxAt(chart, host, mx, my) {
+  let out;
+  try { out = chart.convertFromPixel({ x: mx, y: my }, { paneId: 'candle_pane' }); }
+  catch (e) { return; }
+  const tl = Array.isArray(out) ? out[0] : out;
+  if (!tl || !Number.isFinite(tl.value)) return;
+  // Default box: ~150px wide, one line tall — a placeholder until the text is
+  // committed and _autoSizeTextBox recomputes it.
+  const brPx = { x: mx + 150, y: my + Math.ceil(20 * 1.2) + 8 };
+  let bo;
+  try { bo = chart.convertFromPixel(brPx, { paneId: 'candle_pane' }); } catch (e) { return; }
+  const br = Array.isArray(bo) ? bo[0] : bo;
+  if (!br || !Number.isFinite(br.value)) return;
+  const mk = (p) => {
+    const o = { value: p.value };
+    if (Number.isFinite(p.timestamp)) o.timestamp = p.timestamp;
+    if (Number.isFinite(p.dataIndex)) o.dataIndex = p.dataIndex;
+    return o;
+  };
+  const inherit = getInheritedStyle('rectangle_snap');
+  const extendData = {
+    textBox: true,
+    text: { ...DEFAULT_TEXT_STATE, content: '', hAlign: 'left', vPos: 'top' },
+    bgEnabled: false, borderEnabled: false, wrap: false,
+  };
+  Drawing._drawHost = host;
+  let id;
+  try { id = chart.createOverlay({ name: 'rectangle_snap', points: [mk(tl), mk(br)], extendData }); }
+  catch (e) { Drawing._drawHost = 'main'; return; }
+  if (typeof id !== 'string') { Drawing._drawHost = 'main'; return; }
+  const live = chart.getOverlayById(id);
+  if (live) trackOverlay(live);
+  Drawing._drawHost = 'main';
+  applyAutoZLevels();
+  refreshObjectTree();
+  // Select it and open the editor on the next tick (the overlay must exist in
+  // the registry first).
+  setTimeout(() => {
+    const entry = Drawing.overlayRegistry.get(id) || (Drawing._miniRegistry && [...Drawing._miniRegistry.values()].find(e => e._ovid === id));
+    Drawing.selectedOverlay = chart.getOverlayById(id) || entry;
+    if (entry) startRectTextEdit(Drawing.overlayRegistry.get(id) || entry);
+  }, 0);
+}
+function _installTextBoxPlacement() {
+  _cancelTextPlacement();
+  const targets = [];
+  const mainEl = document.getElementById('chart');
+  if (mainEl && Drawing.chart) targets.push({ el: mainEl, chart: Drawing.chart, host: 'main' });
+  const mc = window.MiniChart && window.MiniChart.chart;
+  const miniEl = document.getElementById('mini-chart');
+  if (mc && miniEl && window.MiniChart.el && !window.MiniChart.el.hidden) targets.push({ el: miniEl, chart: mc, host: 'mini' });
+  const handlers = [];
+  for (const tgt of targets) {
+    const onClick = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const r = tgt.el.getBoundingClientRect();
+      _cancelTextPlacement();
+      _placeTextBoxAt(tgt.chart, tgt.host, e.clientX - r.left, e.clientY - r.top);
+      setTool('cross');
+    };
+    tgt.el.addEventListener('mousedown', onClick, true);
+    handlers.push([tgt.el, onClick]);
+  }
+  _textPlacementCleanup = () => handlers.forEach(([el, fn]) => el.removeEventListener('mousedown', fn, true));
+}
+
 function setTool(tool) {
+  _cancelTextPlacement();
   Drawing.activeTool = tool;
   if (Drawing._updateSnapIndicator) Drawing._updateSnapIndicator();
 
@@ -2871,23 +3968,32 @@ function setTool(tool) {
   });
 
   // Disable chart pan/zoom while a drawing tool is active so accidental drag
-  // doesn't pan the chart and break path/trendline placement.
-  if (Drawing.chart) {
+  // doesn't pan the chart and break path/trendline placement. Applied to BOTH
+  // charts since the tool is armed on both (main + open mini).
+  {
     const drawing = tool !== 'cross';
-    try { Drawing.chart.setScrollEnabled(!drawing); } catch (e) { /* ignore */ }
-    try { Drawing.chart.setZoomEnabled(!drawing); } catch (e) { /* ignore */ }
+    const _dis = (c) => { if (!c) return; try { c.setScrollEnabled(!drawing); } catch (e) {} try { c.setZoomEnabled(!drawing); } catch (e) {} };
+    _dis(Drawing.chart);
+    const _mc = window.MiniChart && window.MiniChart.chart;
+    if (_mc && window.MiniChart.el && !window.MiniChart.el.hidden) _dis(_mc);
   }
 
   const quickbar = document.getElementById('tool-quickbar');
   if (tool === 'cross') {
     quickbar.classList.add('hidden');
+    Drawing._drawTarget = null;   // reset draw target back to the main chart
+    Drawing._drawHost = 'main';
     return;
   }
 
   quickbar.classList.remove('hidden');
 
+  // Text box uses single-click placement, not KLineChart's draw flow.
+  if (tool === 'text') { _installTextBoxPlacement(); return; }
+
   const overlayName = {
     trendline: 'trendline_snap',
+    curve: 'curve_snap',
     rectangle: 'rectangle_snap',
     path: 'path_snap',
     measure: 'measure_snap',
@@ -2895,66 +4001,96 @@ function setTool(tool) {
     'short-position': 'short_position',
     'fibo-retrace':   'fibo_retrace',
     'fibo-extension': 'fibo_extension',
+    'fibo-time':      'fibo_time',
   }[tool];
 
   if (overlayName && Drawing.chart) {
     // Reset prior drawing state before starting a new one
     Drawing.drawingId = null;
     Drawing.drawingPoints = [];
+    Drawing._mainDrawId = null;
+    Drawing._miniDrawId = null;
 
     const isPositionLong  = overlayName === 'long_position';
     const isPositionShort = overlayName === 'short_position';
     const isPosition = isPositionLong || isPositionShort;
-    const isFibo = overlayName === 'fibo_retrace' || overlayName === 'fibo_extension';
+    const isFibo = overlayName === 'fibo_retrace' || overlayName === 'fibo_extension' || overlayName === 'fibo_time';
 
-    const opts = {
-      name: overlayName,
-      onDrawStart: (event) => {
-        const ov = event && (event.overlay || event);
-        if (ov && ov.id) Drawing.drawingId = ov.id;
-        if (ov && ov.points) Drawing.drawingPoints = ov.points.slice();
-      },
-      onDrawing: (event) => {
-        const ov = event && (event.overlay || event);
-        if (ov && ov.id) Drawing.drawingId = ov.id;
-        if (ov && ov.points) Drawing.drawingPoints = ov.points.slice();
-      },
-      onDrawEnd: (event) => {
-        const ov = event && (event.overlay || event);
-        // Position overlays drop with 1 stored point — auto-fill target+stop
-        // around it before tracking, so the registry/persistence sees all 3.
-        if (ov && isPosition && ov.points && ov.points.length === 1) {
-          _autoFillPositionPoints(ov, isPositionLong ? 'long' : 'short');
-        }
-        // Fibo overlays — seed extendData on first draw if the inheritance
-        // path didn't provide one, so the settings popover can read
-        // overlay.extendData.fibo / .levels without null-guarding everywhere.
-        if (ov && isFibo) {
-          if (!ov.extendData || !ov.extendData.fibo || !ov.extendData.levels) {
-            const seeded = _newFiboExtendData();
-            try { Drawing.chart.overrideOverlay({ id: ov.id, extendData: seeded }); }
-            catch (e) { /* ignore */ }
-            ov.extendData = seeded;
-          }
-        }
-        if (ov && ov.id) trackOverlay(ov);
-        Drawing.drawingId = null;
-        Drawing.drawingPoints = [];
-        setTimeout(() => {
-          setTool('cross');
-          refreshObjectTree();
-        }, 50);
-      },
-    };
-    // Inherit style from the last-customized shape of this type (text content
-    // intentionally NOT inherited — each new shape starts with an empty label).
     const inherit = getInheritedStyle(overlayName);
-    if (inherit) {
-      if (inherit.styles) opts.styles = inherit.styles;
-      if (inherit.extendData) opts.extendData = inherit.extendData;
-    }
 
-    Drawing.chart.createOverlay(opts);
+    // Arm the tool on BOTH charts (main + open mini). The user draws on
+    // whichever they click into; whichever finishes gets tracked to its
+    // host's registry, and the other chart's pending draw is cancelled.
+    const makeOpts = (host, hostChart) => {
+      const o = {
+        name: overlayName,
+        onDrawStart: (event) => {
+          const ov = event && (event.overlay || event);
+          if (ov && ov.id) {
+            Drawing.drawingId = ov.id;
+            if (host === 'mini') Drawing._miniDrawId = ov.id; else Drawing._mainDrawId = ov.id;
+          }
+          if (ov && ov.points) Drawing.drawingPoints = ov.points.slice();
+        },
+        onDrawing: (event) => {
+          const ov = event && (event.overlay || event);
+          if (ov && ov.id) Drawing.drawingId = ov.id;
+          if (ov && ov.points) Drawing.drawingPoints = ov.points.slice();
+        },
+        onDrawEnd: (event) => {
+          const ov = event && (event.overlay || event);
+          Drawing._drawHost = host;   // trackOverlay routes by this
+          // Position overlays drop with 1 stored point — auto-fill target+stop.
+          if (ov && isPosition && ov.points && ov.points.length === 1) {
+            _autoFillPositionPoints(ov, isPositionLong ? 'long' : 'short', hostChart);
+          }
+          // Fibo overlays — seed extendData on first draw if missing, using the
+          // LAST-USED config (levels/colours the user last set up) so a new fibo
+          // inherits it; falls back to defaults when nothing has been used.
+          if (ov && isFibo) {
+            if (!ov.extendData || !ov.extendData.fibo || !ov.extendData.levels) {
+              const seeded = _fiboSeedFor(overlayName);
+              try { hostChart.overrideOverlay({ id: ov.id, extendData: seeded }); }
+              catch (e) { /* ignore */ }
+              ov.extendData = seeded;
+            }
+          }
+          if (ov && ov.id) trackOverlay(ov);
+          _cancelDrawOnOtherChart(host);
+          Drawing.drawingId = null;
+          Drawing.drawingPoints = [];
+          Drawing._drawHost = 'main';
+          setTimeout(() => {
+            setTool('cross');
+            // A freshly drawn rectangle would otherwise sit above everything
+            // already inside it (topmost-first hit test) — re-rank by area.
+            if (host === 'main') { try { applyAutoZLevels(); } catch (e) {} }
+            refreshObjectTree();
+          }, 50);
+        },
+      };
+      // Inherit style from the last-customized shape of this type (text content
+      // intentionally NOT inherited — each new shape starts with an empty label).
+      if (inherit) {
+        if (inherit.styles) o.styles = inherit.styles;
+        if (inherit.extendData) o.extendData = inherit.extendData;
+      }
+      // Fibo: seed the LAST-USED config on the in-progress overlay so the DRAW
+      // PREVIEW already shows the saved levels (not defaults). Without this the
+      // in-progress fibo has no extendData → buildFiboFigures falls back to
+      // defaults while dragging, and only the finalized overlay picks up
+      // last-used (Aaron: "拉的時候跑出預設, 拉完才變成存的範例").
+      if (isFibo && !o.extendData) {
+        o.extendData = _fiboSeedFor(overlayName);
+      }
+      return o;
+    };
+
+    Drawing.chart.createOverlay(makeOpts('main', Drawing.chart));
+    const miniChart = window.MiniChart && window.MiniChart.chart;
+    if (miniChart && window.MiniChart.el && !window.MiniChart.el.hidden) {
+      miniChart.createOverlay(makeOpts('mini', miniChart));
+    }
   }
 }
 
@@ -2967,6 +4103,20 @@ let _drawingI18nWired = false;
 function init(chart) {
   Drawing.chart = chart;
   registerOverlays();
+
+  // Branch-scoped position overlays: re-filter visibility whenever the
+  // active branch changes (hide other branches' boxes, show this one's).
+  if (!Drawing._branchFilterWired && window.BranchEngine && window.BranchEngine.on) {
+    Drawing._branchFilterWired = true;
+    window.BranchEngine.on('activeBranchChanged', () => {
+      try { applyBranchFilter(); } catch (e) {}
+    });
+    // Cascade-delete a deleted branch's overlays (main + mini). The engine
+    // re-parents children but overlays are removed, not re-parented.
+    window.BranchEngine.on('branchDeleted', (payload) => {
+      try { removeBranchOverlays(payload && payload.id); } catch (e) {}
+    });
+  }
 
   // Spec i18n §4.3: on language change, re-render every drawing UI
   // surface that uses dynamic labels — shortcut catalog, object tree,
@@ -3067,13 +4217,19 @@ function init(chart) {
     if (e.altKey && !e.shiftKey && !e.ctrlKey) {
       const k = e.key.toLowerCase();
       if (k === 't') { setTool('trendline'); e.preventDefault(); return; }
-      if (k === 'r') { setTool('rectangle'); e.preventDefault(); return; }
+      // Rectangle: Alt+R, plus Alt+G as a backup — some systems have a global
+      // hotkey (screen-recorders / GPU overlays like GeForce ShadowPlay) that
+      // swallows Alt+R before the page ever sees it.
+      if (k === 'r' || k === 'g') { setTool('rectangle'); e.preventDefault(); return; }
+      if (k === 'c') { setTool('curve'); e.preventDefault(); return; }
       if (k === 'p') { setTool('path'); e.preventDefault(); return; }
       if (k === 'm') { setTool('measure'); e.preventDefault(); return; }
       if (k === 'l') { setTool('long-position'); e.preventDefault(); return; }
       if (k === 's') { setTool('short-position'); e.preventDefault(); return; }
       if (k === 'f') { setTool('fibo-retrace');   e.preventDefault(); return; }
       if (k === 'e') { setTool('fibo-extension'); e.preventDefault(); return; }
+      if (k === 'i') { setTool('fibo-time');      e.preventDefault(); return; }
+      if (k === 'x') { setTool('text');           e.preventDefault(); return; }
     }
     if (e.key === 'Escape') {
       // If a path is in progress, finalize it with current points
@@ -3140,19 +4296,27 @@ function init(chart) {
   // rapid clicks at different positions (the user laying down points fast)
   // would trip the browser's dblclick threshold and finalize prematurely.
   const chartElForDbl = document.getElementById('chart');
-  const _recentClicks = [];   // last 2 click positions
-  chartElForDbl.addEventListener('click', (e) => {
-    _recentClicks.push({ x: e.clientX, y: e.clientY });
-    if (_recentClicks.length > 2) _recentClicks.shift();
-  });
-  chartElForDbl.addEventListener('dblclick', () => {
-    if (_recentClicks.length >= 2) {
-      const [a, b] = _recentClicks;
-      if (Math.hypot(b.x - a.x, b.y - a.y) > 8) return;
-    }
-    finalizeInProgressPath();
-    setTool('cross');
-  });
+  // Dblclick-finishes-a-path, installed per chart (its own recent-click buffer)
+  // so the path tool finishes with a double-click on the mini too.
+  // finalizeInProgressPath is chart-aware (Drawing._pathHost).
+  function _installPathClickHandlers(el) {
+    const recentClicks = [];   // last 2 click positions on THIS chart
+    el.addEventListener('click', (e) => {
+      recentClicks.push({ x: e.clientX, y: e.clientY });
+      if (recentClicks.length > 2) recentClicks.shift();
+    });
+    el.addEventListener('dblclick', () => {
+      if (recentClicks.length >= 2) {
+        const [a, b] = recentClicks;
+        if (Math.hypot(b.x - a.x, b.y - a.y) > 8) return;
+      }
+      finalizeInProgressPath();
+      setTool('cross');
+    });
+  }
+  _installPathClickHandlers(chartElForDbl);
+  const _miniElForPathClick = document.getElementById('mini-chart');
+  if (_miniElForPathClick) _installPathClickHandlers(_miniElForPathClick);
 
   // ---- Drawing point placement: we own it entirely for path/trendline/rect ----
   // KLineChart's built-in click-adds-a-point requires mousedown and mouseup at
@@ -3162,14 +4326,17 @@ function init(chart) {
   // does nothing; the next point requires a new mousedown. For trendline and
   // rectangle we auto-finalize once the target point count is reached.
   const DRAW_TOOL_FINISH_POINTS = {
+    curve: 2,   // 2 clicks (A, C); the apex B is auto-seeded with a bow
     trendline: 2,
     rectangle: 2,
     path: null,          // path never auto-finishes — user triggers finalize
     'fibo-retrace':   2,  // 2 points = high + low
     'fibo-extension': 3,  // 3 points = trend start + trend end + projection
+    'fibo-time':      3,  // 3 points = interval start + end + projection origin
   };
   const DRAW_TOOL_OVERLAY_NAME = {
     trendline: 'trendline_snap',
+    curve:     'curve_snap',
     rectangle: 'rectangle_snap',
     path:      'path_snap',
     measure:   'measure_snap',
@@ -3177,32 +4344,50 @@ function init(chart) {
     'short-position': 'short_position',
     'fibo-retrace':   'fibo_retrace',
     'fibo-extension': 'fibo_extension',
+    'fibo-time':      'fibo_time',
   };
 
-  chartElForDbl.addEventListener('mousedown', (e) => {
+  // Point-placement takeover, installed on BOTH the main chart and the mini
+  // chart so drawing behaves identically on either: 2-click curve (A,C) with an
+  // auto-seeded bow, fast-click robustness, and Ctrl/Shift snap. The chart, its
+  // in-progress overlay id, and its bar list are all resolved from the container
+  // the event fired on — main uses Drawing.drawingId + App.currentBars, the mini
+  // uses Drawing._miniDrawId + the mini's own getDataList().
+  function _handleDrawMousedown(e, containerEl) {
     const tool = Drawing.activeTool;
     if (!(tool in DRAW_TOOL_FINISH_POINTS)) return;
     if (e.button !== 0) return;
-    if (!Drawing.chart || !Drawing.drawingId) return;
+    const isMini = !!(containerEl && containerEl.id === 'mini-chart');
+    const chart = isMini ? (window.MiniChart && window.MiniChart.chart) : Drawing.chart;
+    const host = isMini ? 'mini' : 'main';
+    const drawingId = isMini ? Drawing._miniDrawId : Drawing.drawingId;
+    if (!chart || !drawingId) return;
+    // Remember which chart the path is being drawn on so its finalize
+    // (right-click / dblclick / Esc, all of which call finalizeInProgressPath)
+    // targets THIS chart. Path never auto-finalizes here (maxPts null).
+    if (tool === 'path') Drawing._pathHost = host;
 
     // Take over — stop KLineChart from running its own click-adds-a-point
     // handler (which will race us and create duplicates on clean clicks).
     e.stopPropagation();
     e.stopImmediatePropagation();
 
-    const rect = chartElForDbl.getBoundingClientRect();
+    const rect = containerEl.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
     let pt;
     try {
-      const out = Drawing.chart.convertFromPixel({ x: mx, y: my }, { paneId: 'candle_pane' });
+      const out = chart.convertFromPixel({ x: mx, y: my }, { paneId: 'candle_pane' });
       pt = Array.isArray(out) ? out[0] : out;
     } catch (err) { return; }
     if (!pt || !Number.isFinite(pt.value)) return;
 
-    // Apply snap modifiers the same way KLineChart's applySnap would.
+    // Apply snap modifiers the same way KLineChart's applySnap would. Snap bars
+    // come from the chart being drawn on (the mini has its own bar window).
     const ss = window.SnapState;
-    const bars = window.App && window.App.currentBars;
+    const bars = isMini
+      ? (chart.getDataList ? chart.getDataList() : [])
+      : (window.App && window.App.currentBars);
     const committedSoFar = Drawing.drawingPoints.slice();
     if (committedSoFar.length > 0) committedSoFar.pop();    // drop preview
     if (ss && ss.ctrlHeld && bars && bars.length) {
@@ -3218,10 +4403,9 @@ function init(chart) {
       else         { pt.dataIndex = ref.dataIndex; pt.timestamp = ref.timestamp; }
     }
 
-    const newPts = [...committedSoFar, pt];
-    const drawingId = Drawing.drawingId;
+    let newPts = [...committedSoFar, pt];   // may be reseeded (curve apex) below
     try {
-      Drawing.chart.overrideOverlay({ id: drawingId, points: newPts });
+      chart.overrideOverlay({ id: drawingId, points: newPts });
       Drawing.drawingPoints = newPts;
     } catch (err) { /* ignore */ }
 
@@ -3234,12 +4418,17 @@ function init(chart) {
     const maxPts = DRAW_TOOL_FINISH_POINTS[tool];
     if (maxPts != null && newPts.length >= maxPts) {
       const overlayName = DRAW_TOOL_OVERLAY_NAME[tool];
+      // Curve finishes on 2 clicks (A,C) → inject the bowed apex B (computed in
+      // THIS chart's pixel space) so the completed overlay is a curve.
+      if (overlayName === 'curve_snap' && newPts.length === 2) {
+        newPts = _seedCurveApex(newPts[0], newPts[1], chart) || newPts;
+      }
       // Read current styles/extendData (inheritance applied at create-time is
       // preserved on the live overlay). Fall back to getInheritedStyle().
+      // NB: klinecharts 9.8.10 has NO chart.getOverlays() — use getOverlayById.
       let ovStyles, ovExtendData;
       try {
-        const arr = Drawing.chart.getOverlays ? Drawing.chart.getOverlays() : [];
-        const match = arr.find(o => o && o.id === drawingId);
+        const match = chart.getOverlayById && chart.getOverlayById(drawingId);
         if (match) { ovStyles = match.styles; ovExtendData = match.extendData; }
       } catch (err) { /* ignore */ }
       if (!ovStyles || !ovExtendData) {
@@ -3247,10 +4436,18 @@ function init(chart) {
         if (!ovStyles     && inh && inh.styles)     ovStyles     = inh.styles;
         if (!ovExtendData && inh && inh.extendData) ovExtendData = inh.extendData;
       }
+      // Fibo has no DRAWING_INHERITED bucket and the in-progress overlay carries
+      // no extendData, so seed the LAST-USED fibo config HERE. This auto-finalize
+      // path takes over the click (stopImmediatePropagation) and creates the
+      // completed overlay itself, bypassing setTool's onDrawEnd fibo seed — which
+      // is why a new fibo always reverted to defaults (Aaron's bug).
+      if (!ovExtendData && (overlayName === 'fibo_retrace' || overlayName === 'fibo_extension' || overlayName === 'fibo_time')) {
+        ovExtendData = _fiboSeedFor(overlayName);
+      }
 
       // Remove the in-progress overlay and create a completed one with all
       // points present.
-      try { Drawing.chart.removeOverlay({ id: drawingId }); } catch (err) { /* ignore */ }
+      try { chart.removeOverlay({ id: drawingId }); } catch (err) { /* ignore */ }
       untrackOverlay(drawingId);
       Drawing.drawingId = null;
       Drawing.drawingPoints = [];
@@ -3259,20 +4456,29 @@ function init(chart) {
       if (ovStyles)     opts.styles     = ovStyles;
       if (ovExtendData) opts.extendData = ovExtendData;
       let newId;
-      try { newId = Drawing.chart.createOverlay(opts); } catch (err) { /* ignore */ }
+      try { newId = chart.createOverlay(opts); } catch (err) { /* ignore */ }
       if (typeof newId === 'string') {
+        // Route trackOverlay to the right registry (main vs _miniRegistry).
+        Drawing._drawHost = host;
         trackOverlay({
           id: newId, name: overlayName, points: newPts,
           styles: ovStyles, extendData: ovExtendData,
           visible: true, lock: false,
         });
+        Drawing._drawHost = 'main';
       }
+      // Drop the OTHER chart's still-armed in-progress overlay (setTool arms
+      // both when the mini is open) so it doesn't leave a stray half-drawn shape.
+      _cancelDrawOnOtherChart(host);
       setTimeout(() => {
         setTool('cross');
         refreshObjectTree();
       }, 50);
     }
-  }, true);
+  }
+  chartElForDbl.addEventListener('mousedown', (e) => _handleDrawMousedown(e, chartElForDbl), true);
+  const _miniElForDraw = document.getElementById('mini-chart');
+  if (_miniElForDraw) _miniElForDraw.addEventListener('mousedown', (e) => _handleDrawMousedown(e, _miniElForDraw), true);
 
   // ---- Right-click: finalize path / cancel other in-progress draws + suppress OS menu ----
   // KLineChart 9.x uses pointerdown internally; intercept BEFORE it bubbles by
@@ -3294,8 +4500,12 @@ function init(chart) {
   // immediately being asked "open chart settings?" is bad UX.
   const chartEl = document.getElementById('chart');
   let _suppressNextContextMenu = false;
-  const blockRightDown = (e) => {
+  // containerEl resolves which chart the right-click landed on: path finalize
+  // is chart-aware (finalizeInProgressPath reads Drawing._pathHost); the
+  // mid-draw cancel drops the in-progress overlay on the RIGHT chart.
+  const blockRightDown = (e, containerEl) => {
     if (e.button !== 2) return;
+    const isMini = !!(containerEl && containerEl.id === 'mini-chart');
     if (Drawing.activeTool === 'path') {
       e.preventDefault();
       e.stopPropagation();
@@ -3306,21 +4516,34 @@ function init(chart) {
       return;
     }
     // Any other drawing tool currently mid-draw → cancel.
-    if (Drawing.activeTool !== 'cross' && Drawing.drawingId) {
+    const id = isMini ? Drawing._miniDrawId : Drawing.drawingId;
+    if (Drawing.activeTool !== 'cross' && id) {
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
-      const id = Drawing.drawingId;
-      try { Drawing.chart.removeOverlay({ id }); } catch (err) {}
+      const chart = isMini ? (window.MiniChart && window.MiniChart.chart) : Drawing.chart;
+      try { chart.removeOverlay({ id }); } catch (err) {}
       try { untrackOverlay(id); } catch (err) {}
-      Drawing.drawingId = null;
+      if (isMini) Drawing._miniDrawId = null; else Drawing.drawingId = null;
       Drawing.drawingPoints = [];
       setTool('cross');
       _suppressNextContextMenu = true;
     }
   };
-  chartEl.addEventListener('pointerdown', blockRightDown, true);
-  chartEl.addEventListener('mousedown', blockRightDown, true);
+  chartEl.addEventListener('pointerdown', (e) => blockRightDown(e, chartEl), true);
+  chartEl.addEventListener('mousedown', (e) => blockRightDown(e, chartEl), true);
+  // Same right-click finish/cancel on the mini chart, plus swallow its OS
+  // context menu (the mini has no chart-area settings popup of its own).
+  const _miniElForRight = document.getElementById('mini-chart');
+  if (_miniElForRight) {
+    _miniElForRight.addEventListener('pointerdown', (e) => blockRightDown(e, _miniElForRight), true);
+    _miniElForRight.addEventListener('mousedown', (e) => blockRightDown(e, _miniElForRight), true);
+    _miniElForRight.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (_suppressNextContextMenu) _suppressNextContextMenu = false;
+    }, true);
+  }
   chartEl.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -3411,6 +4634,7 @@ function init(chart) {
 // mouse events against computed handle positions ourselves.
 let _rectDrag = null;    // { overlayId, handleIdx }
 let _rectHoverCursor = '';
+let _miniHoverCursor = '';   // mini-chart hover cursor (rect resize arrow / pointer)
 let _rectEditingId = null;    // id of rect currently in inline-text-edit mode
 let _rectEditHost = null;     // host <div> of rect inline editor (for live reposition during drag)
 let _trendEditingId = null;   // id of trendline currently in inline-text-edit mode
@@ -3459,10 +4683,26 @@ function cursorForRectHandle(idx) { return RECT_HANDLE_CURSOR[idx] || ''; }
 function hitTestRectHandle(mx, my) {
   const sel = Drawing.selectedOverlay;
   if (!sel || sel.name !== 'rectangle_snap') return null;
-  const entry = Drawing.overlayRegistry.get(sel.id);
-  if (!entry || entry.lock || entry.visible === false) return null;
-  if (!entry.points || entry.points.length < 2) return null;
-  const handles = computeRectHandlePixels(entry.points[0], entry.points[1]);
+  // chart-aware: a mini rect's id isn't in overlayRegistry — resolve which
+  // chart it's on, then take its live points (with dataIndex) from that chart's
+  // overlay so the handle pixels are computed in the right coordinate space.
+  const chart = _chartOf(sel.id);
+  const isMini = chart !== Drawing.chart;
+  let entry, points;
+  if (isMini) {
+    let me = null;
+    if (Drawing._miniRegistry) for (const e of Drawing._miniRegistry.values()) { if (e._ovid === sel.id) { me = e; break; } }
+    if (!me || me.lock || me.visible === false) return null;
+    const miniOv = chart.getOverlayById && chart.getOverlayById(sel.id);
+    if (!miniOv || !miniOv.points || miniOv.points.length < 2) return null;
+    entry = me; points = miniOv.points;
+  } else {
+    entry = Drawing.overlayRegistry.get(sel.id);
+    if (!entry || entry.lock || entry.visible === false) return null;
+    if (!entry.points || entry.points.length < 2) return null;
+    points = entry.points;
+  }
+  const handles = computeRectHandlePixels(points[0], points[1], chart);
   if (!handles) return null;
   let best = null;
   for (const h of handles) {
@@ -3470,7 +4710,7 @@ function hitTestRectHandle(mx, my) {
     const d = dx * dx + dy * dy;
     if (d > HANDLE_HIT_RADIUS_SQ) continue;
     if (!best || d < best.distSq) {
-      best = { overlayId: entry.id, entry, points: entry.points, handle: h, distSq: d, isSel: true };
+      best = { overlayId: sel.id, entry, points, handle: h, distSq: d, isSel: true, chart, isMini };
     }
   }
   return best;
@@ -3478,26 +4718,39 @@ function hitTestRectHandle(mx, my) {
 
 // Is the pointer inside ANY tracked rectangle's body? Used to paint `pointer`
 // cursor when hovering a rectangle (but not on a handle — handles win).
-function hitTestRectBody(mx, my) {
-  for (const entry of Drawing.overlayRegistry.values()) {
-    if (entry.name !== 'rectangle_snap') continue;
-    if (entry.visible === false) continue;
-    if (!entry.points || entry.points.length < 2) continue;
-    const px = computeRectHandlePixels(entry.points[0], entry.points[1]);
+function hitTestRectBody(mx, my, chart) {
+  chart = chart || Drawing.chart;
+  const isMini = chart !== Drawing.chart;
+  const rects = [];
+  if (isMini) {
+    if (Drawing._miniRegistry) for (const e of Drawing._miniRegistry.values()) {
+      if (e.name !== 'rectangle_snap' || e.visible === false || !e._ovid) continue;
+      const ov = chart.getOverlayById && chart.getOverlayById(e._ovid);
+      if (ov && ov.points && ov.points.length >= 2) rects.push({ points: ov.points, ref: e });
+    }
+  } else {
+    for (const e of Drawing.overlayRegistry.values()) {
+      if (e.name !== 'rectangle_snap' || e.visible === false || !e.points || e.points.length < 2) continue;
+      rects.push({ points: e.points, ref: e });
+    }
+  }
+  for (const r of rects) {
+    const px = computeRectHandlePixels(r.points[0], r.points[1], chart);
     if (!px) continue;
     // handles[0]=TL, [3]=BR — enough to get bounds
     const xL = Math.min(px[0].x, px[3].x);
     const xR = Math.max(px[0].x, px[3].x);
     const yT = Math.min(px[0].y, px[3].y);
     const yB = Math.max(px[0].y, px[3].y);
-    if (mx >= xL && mx <= xR && my >= yT && my <= yB) return entry;
+    if (mx >= xL && mx <= xR && my >= yT && my <= yB) return r.ref;
   }
   return null;
 }
 
-function computeRectHandlePixels(p1, p2) {
+function computeRectHandlePixels(p1, p2, chart) {
+  chart = chart || Drawing.chart;
   try {
-    const out = Drawing.chart.convertToPixel(
+    const out = chart.convertToPixel(
       [{ dataIndex: p1.dataIndex, value: p1.value },
        { dataIndex: p2.dataIndex, value: p2.value }],
       { paneId: 'candle_pane' }
@@ -3684,10 +4937,12 @@ function initRectHandleDrag() {
 
     const hit = hitTestRectHandle(mx, my);
     const bodyEntry = hit ? null : hitTestRectBody(mx, my);
-    // Priority: rect handle (resize) > rect body (pointer) > trendline (pointer) > none.
+    // Priority: rect handle (resize) > rect body > trendline (pointer) > none.
+    // A text box body shows the MOVE cursor (it's draggable); a plain rectangle
+    // body shows pointer (not movable, only resizable via handles).
     let desired;
     if (hit) desired = cursorForRectHandle(hit.handle.idx);
-    else if (bodyEntry) desired = 'pointer';
+    else if (bodyEntry) desired = (bodyEntry.extendData && bodyEntry.extendData.textBox) ? 'move' : 'pointer';
     else if (nearestTrendId) desired = 'pointer';
     else desired = '';
     if (desired !== _rectHoverCursor) {
@@ -3706,14 +4961,89 @@ function initRectHandleDrag() {
     }
   }, true);
 
-  chartEl.addEventListener('mousedown', (e) => {
+  // Mini-chart hover cursor: resize arrows over a selected mini rect's handles,
+  // pointer over a mini rect body. hitTestRectHandle is chart-aware (uses the
+  // selected overlay's chart); hitTestRectBody is passed the mini chart.
+  const _miniHoverEl = document.getElementById('mini-chart');
+  if (_miniHoverEl) {
+    _miniHoverEl.addEventListener('mousemove', (e) => {
+      if (_rectDrag || _overlayDrag) return;
+      const setCur = (desired) => {
+        if (desired === _miniHoverCursor) return;
+        if (desired) {
+          _miniHoverEl.style.setProperty('cursor', desired, 'important');
+          _miniHoverEl.querySelectorAll('canvas').forEach(cv => cv.style.setProperty('cursor', desired, 'important'));
+        } else {
+          _miniHoverEl.style.removeProperty('cursor');
+          _miniHoverEl.querySelectorAll('canvas').forEach(cv => cv.style.removeProperty('cursor'));
+        }
+        _miniHoverCursor = desired;
+      };
+      if (Drawing.activeTool !== 'cross') { setCur(''); return; }
+      const mc = window.MiniChart && window.MiniChart.chart;
+      if (!mc) { setCur(''); return; }
+      const rect = _miniHoverEl.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      const hit = hitTestRectHandle(mx, my);
+      const bodyEntry = hit ? null : hitTestRectBody(mx, my, mc);
+      setCur(hit ? cursorForRectHandle(hit.handle.idx) : (bodyEntry ? 'pointer' : ''));
+    }, true);
+  }
+
+  const _onRectHandleDown = (e, containerEl) => {
     if (e.button !== 0) return;
     if (Drawing.activeTool !== 'cross') return;    // only in selection mode
-    const rect = chartEl.getBoundingClientRect();
+    const rect = containerEl.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
     const hit = hitTestRectHandle(mx, my);
-    if (!hit) return;
+    if (!hit) {
+      // Body drag → MOVE a text box (rectangles keep their resize-only behavior,
+      // so this is gated on the textBox flag). Translates BOTH corners by the
+      // same pixel delta = a pure move.
+      const mchart = window.MiniChart && window.MiniChart.chart;
+      const chart = (containerEl.id === 'mini-chart' && mchart) ? mchart : Drawing.chart;
+      const isMini = chart !== Drawing.chart;
+      const bodyEntry = hitTestRectBody(mx, my, chart);
+      if (bodyEntry && bodyEntry.extendData && bodyEntry.extendData.textBox && !bodyEntry.lock) {
+        const id = isMini ? bodyEntry._ovid : bodyEntry.id;
+        let pts = isMini ? (chart.getOverlayById(id) || {}).points : bodyEntry.points;
+        if (!pts || pts.length < 2) return;
+        let startPx;
+        try {
+          startPx = chart.convertToPixel(
+            [{ dataIndex: pts[0].dataIndex, value: pts[0].value },
+             { dataIndex: pts[1].dataIndex, value: pts[1].value }], { paneId: 'candle_pane' });
+        } catch (err) { return; }
+        _rectDrag = {
+          overlayId: id, moveMode: true, chart, isMini, containerEl,
+          startMx: mx, startMy: my,
+          startPointPx: startPx.map(p => ({ x: p.x, y: p.y })),
+          beforePoints: pts.map(p => ({ ...p })),
+        };
+        // Select it now (we stopImmediatePropagation below, so KLineChart's own
+        // onSelected won't fire) and repaint so the handles appear immediately.
+        const prevSel = Drawing.selectedOverlay && Drawing.selectedOverlay.id;
+        Drawing.selectedOverlay = chart.getOverlayById(id) || bodyEntry;
+        if (prevSel && prevSel !== id) { try { _forceSelectRepaint(prevSel); } catch (er) {} }
+        try { _forceSelectRepaint(id); } catch (er) {}
+        markSelectedTreeRow(id);
+        setGlobalCursor('grabbing');
+        e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+        return;
+      }
+      // Clicked empty space (or a non-text-box) while a TEXT BOX is selected →
+      // deselect it. KLineChart's onDeselected doesn't fire for our manually-
+      // selected text boxes, so the handles would otherwise never clear. Don't
+      // stop propagation: a click on another overlay still selects it normally.
+      const sel = Drawing.selectedOverlay;
+      if (sel && sel.extendData && sel.extendData.textBox && _rectEditingId !== sel.id) {
+        Drawing.selectedOverlay = null;
+        try { _forceSelectRepaint(sel.id); } catch (er) {}
+        markSelectedTreeRow(null);
+      }
+      return;
+    }
     const p1 = hit.points[0], p2 = hit.points[1];
     // Pin xPointIdx / yPointIdx ONCE at drag start. During the whole drag
     // we always mutate the same stored point(s) — this gives the
@@ -3734,10 +5064,11 @@ function initRectHandleDrag() {
       case 7: xPointIdx = leftIdx;   break;                        // L
       case 8: xPointIdx = rightIdx;  break;                        // R
     }
-    _rectDrag = { overlayId: hit.overlayId, handleIdx: hit.handle.idx, xPointIdx, yPointIdx };
-    // Snapshot points for undo. Deep copy because the mousemove handler
-    // mutates `entry.points` in place during drag.
-    _rectDrag.beforePoints = (hit.entry.points || []).map(p => ({ ...p }));
+    _rectDrag = { overlayId: hit.overlayId, handleIdx: hit.handle.idx, xPointIdx, yPointIdx,
+                  chart: hit.chart, isMini: hit.isMini, containerEl };
+    // Snapshot points for undo (hit.points already has dataIndex from the
+    // right chart's overlay). Deep copy — mousemove mutates in place.
+    _rectDrag.beforePoints = (hit.points || []).map(p => ({ ...p }));
     // Auto-select the rect we're about to drag. We have to set selectedOverlay
     // directly because our capture-phase stopImmediatePropagation() prevents
     // KLineChart from firing its own onSelected handler.
@@ -3749,23 +5080,64 @@ function initRectHandleDrag() {
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
-  }, true);
+  };
+  chartEl.addEventListener('mousedown', (e) => _onRectHandleDown(e, chartEl), true);
+  const _miniElForRect = document.getElementById('mini-chart');
+  if (_miniElForRect) _miniElForRect.addEventListener('mousedown', (e) => _onRectHandleDown(e, _miniElForRect), true);
 
   window.addEventListener('mousemove', (e) => {
     if (!_rectDrag) return;
-    const entry = Drawing.overlayRegistry.get(_rectDrag.overlayId);
-    if (!entry || !entry.points || entry.points.length < 2) return;
-    const chartElRect = chartEl.getBoundingClientRect();
+    const dChart = _rectDrag.chart || Drawing.chart;
+    const dEl = _rectDrag.containerEl || chartEl;
+    // Current points live on the chart overlay (mini) or the registry (main).
+    let curPoints = null;
+    if (_rectDrag.isMini) {
+      const ov = dChart.getOverlayById && dChart.getOverlayById(_rectDrag.overlayId);
+      curPoints = ov && ov.points;
+    } else {
+      const entry = Drawing.overlayRegistry.get(_rectDrag.overlayId);
+      curPoints = entry && entry.points;
+    }
+    if (!curPoints || curPoints.length < 2) return;
+    const chartElRect = dEl.getBoundingClientRect();
     const mx = e.clientX - chartElRect.left;
     const my = e.clientY - chartElRect.top;
+
+    // Move mode (text box body drag): shift both corners by the pixel delta.
+    if (_rectDrag.moveMode) {
+      const dx = mx - _rectDrag.startMx, dy = my - _rectDrag.startMy;
+      const movePts = _rectDrag.beforePoints.map((p, i) => {
+        let out;
+        try { out = dChart.convertFromPixel({ x: _rectDrag.startPointPx[i].x + dx, y: _rectDrag.startPointPx[i].y + dy }, { paneId: 'candle_pane' }); }
+        catch (err) { return { ...p }; }
+        const cc = Array.isArray(out) ? out[0] : out;
+        if (!cc || !Number.isFinite(cc.value)) return { ...p };
+        const o = { value: cc.value };
+        if (Number.isFinite(cc.timestamp)) o.timestamp = cc.timestamp;
+        if (Number.isFinite(cc.dataIndex)) o.dataIndex = cc.dataIndex;
+        return o;
+      });
+      try { dChart.overrideOverlay({ id: _rectDrag.overlayId, points: movePts }); } catch (err) {}
+      if (_rectDrag.isMini) {
+        if (Drawing._miniRegistry) for (const en of Drawing._miniRegistry.values())
+          if (en._ovid === _rectDrag.overlayId) { en.points = movePts.map(p => ({ timestamp: p.timestamp, value: p.value })); break; }
+      } else {
+        const entry = Drawing.overlayRegistry.get(_rectDrag.overlayId);
+        if (entry) entry.points = movePts;
+      }
+      if (_rectEditingId === _rectDrag.overlayId) repositionRectEditor();
+      e.preventDefault(); e.stopPropagation();
+      return;
+    }
+
     let pt = null;
     try {
-      const out = Drawing.chart.convertFromPixel({ x: mx, y: my }, { paneId: 'candle_pane' });
+      const out = dChart.convertFromPixel({ x: mx, y: my }, { paneId: 'candle_pane' });
       pt = Array.isArray(out) ? out[0] : out;
     } catch (err) { return; }
     if (!pt) return;
 
-    const newPts = entry.points.map(p => ({ ...p }));
+    const newPts = curPoints.map(p => ({ ...p }));
     if (_rectDrag.xPointIdx != null) {
       newPts[_rectDrag.xPointIdx].dataIndex = pt.dataIndex;
       newPts[_rectDrag.xPointIdx].timestamp = pt.timestamp;
@@ -3774,9 +5146,17 @@ function initRectHandleDrag() {
       newPts[_rectDrag.yPointIdx].value = pt.value;
     }
     try {
-      Drawing.chart.overrideOverlay({ id: _rectDrag.overlayId, points: newPts });
+      dChart.overrideOverlay({ id: _rectDrag.overlayId, points: newPts });
     } catch (err) { /* ignore */ }
-    entry.points = newPts;
+    // Sync to the right registry.
+    if (_rectDrag.isMini) {
+      if (Drawing._miniRegistry) for (const en of Drawing._miniRegistry.values()) {
+        if (en._ovid === _rectDrag.overlayId) { en.points = newPts.map(p => ({ timestamp: p.timestamp, value: p.value })); break; }
+      }
+    } else {
+      const entry = Drawing.overlayRegistry.get(_rectDrag.overlayId);
+      if (entry) entry.points = newPts;
+    }
     // If this rect is in inline-edit mode, keep the textarea aligned with the
     // moving rect so the user's in-progress text doesn't "fly away".
     if (_rectEditingId === _rectDrag.overlayId) repositionRectEditor();
@@ -3788,27 +5168,29 @@ function initRectHandleDrag() {
     if (_rectDrag) {
       // Undo entry — drag was a single logical operation. Skip if
       // points didn't actually change (user clicked a handle without
-      // dragging).
+      // dragging). chart-aware: mini rects read/write via the mini chart
+      // + _miniRegistry.
       const id = _rectDrag.overlayId;
-      const entry = Drawing.overlayRegistry.get(id);
+      const dChart = _rectDrag.chart || Drawing.chart;
+      const isMini = !!_rectDrag.isMini;
+      let afterSrc;
+      if (isMini) { const ov = dChart.getOverlayById && dChart.getOverlayById(id); afterSrc = ov && ov.points; }
+      else { const entry = Drawing.overlayRegistry.get(id); afterSrc = entry && entry.points; }
       const before = _rectDrag.beforePoints || [];
-      const after  = entry && entry.points ? entry.points.map(p => ({ ...p })) : [];
+      const after  = afterSrc ? afterSrc.map(p => ({ ...p })) : [];
       const sameAsBefore = before.length === after.length
         && before.every((p, i) =>
             p.timestamp === after[i].timestamp && p.value === after[i].value);
       if (!sameAsBefore && before.length && after.length) {
+        const ptsFor = (pts) => isMini ? _pointsForMini(dChart, pts) : _pointsForChart(pts);
+        const syncReg = (pts) => {
+          if (isMini) { if (Drawing._miniRegistry) for (const en of Drawing._miniRegistry.values()) { if (en._ovid === id) { en.points = pts.map(p => ({ timestamp: p.timestamp, value: p.value })); break; } } }
+          else { const e2 = Drawing.overlayRegistry.get(id); if (e2) e2.points = pts.map(p => ({ ...p })); }
+        };
         pushUndo({
-          label: 'Resize rectangle',
-          undo: () => {
-            try { Drawing.chart.overrideOverlay({ id, points: _pointsForChart(before) }); } catch (e) {}
-            const e2 = Drawing.overlayRegistry.get(id);
-            if (e2) e2.points = before.map(p => ({ ...p }));
-          },
-          redo: () => {
-            try { Drawing.chart.overrideOverlay({ id, points: _pointsForChart(after) }); } catch (e) {}
-            const e2 = Drawing.overlayRegistry.get(id);
-            if (e2) e2.points = after.map(p => ({ ...p }));
-          },
+          label: _rectDrag.moveMode ? 'Move text box' : 'Resize rectangle',
+          undo: () => { try { dChart.overrideOverlay({ id, points: ptsFor(before) }); } catch (e) {} syncReg(before); },
+          redo: () => { try { dChart.overrideOverlay({ id, points: ptsFor(after) }); } catch (e) {} syncReg(after); },
         });
       }
       _rectDrag = null;
@@ -3864,11 +5246,91 @@ function initRectHandleDrag() {
       // else: already selected but clicked elsewhere on line → no-op
     }
   });
+
+  // Text box: DOUBLE-click the body to edit (single-click selects / arms move,
+  // so the rectangle's single-click-to-edit doesn't apply). Main chart only —
+  // mini text editing isn't wired yet.
+  chartEl.addEventListener('dblclick', (e) => {
+    if (Drawing.activeTool !== 'cross') return;
+    const rect = chartEl.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const bodyEntry = hitTestRectBody(mx, my, Drawing.chart);
+    if (bodyEntry && bodyEntry.extendData && bodyEntry.extendData.textBox && !bodyEntry.lock) {
+      e.preventDefault(); e.stopPropagation();
+      Drawing.selectedOverlay = Drawing.chart.getOverlayById(bodyEntry.id) || bodyEntry;
+      startRectTextEdit(bodyEntry);
+    }
+  }, true);
 }
 
 // =================================================================
 // Inline text editor for rectangle labels
 // =================================================================
+// Pixel extent a text box needs to fit `textState`. wrap=false → width = the
+// widest explicit line (auto-grow, no wrapping). wrap=true → width is clamped to
+// fixedWidthPx and lines soft-wrap; height grows with the wrapped count. Returns
+// { w, h } in pixels including 4px padding on every side. Top-level (not inside
+// registerOverlays) so _autoSizeTextBox can call it.
+function measureTextBoxPixels(textState, wrap, fixedWidthPx) {
+  const t = { ...DEFAULT_TEXT_STATE, ...(textState || {}) };
+  const pad = 4;
+  const weight = t.bold ? 900 : 400;
+  const ctx = _textMeasureCtx();
+  ctx.font = `${t.italic ? 'italic ' : ''}${weight} ${t.size}px "Noto Sans SC", sans-serif`;
+  const lineHeight = Math.ceil(t.size * 1.2);
+  const paras = (t.content || '').split(/\r?\n/);
+  let lines = [];
+  if (wrap) {
+    const inner = Math.max(8, (fixedWidthPx || 160) - 2 * pad);
+    for (const p of paras) lines.push(...(p ? wrapLine(ctx, p, inner) : ['']));
+  } else {
+    lines = paras;
+  }
+  let maxW = 0;
+  for (const ln of lines) maxW = Math.max(maxW, ctx.measureText(ln || '').width);
+  const w = wrap ? (fixedWidthPx || 160) : Math.ceil(maxW) + 2 * pad;
+  const h = Math.max(1, lines.length) * lineHeight + 2 * pad;
+  return { w: Math.max(24, w), h: Math.max(lineHeight + 2 * pad, h) };
+}
+
+// Resize a text box to fit its text after an edit. Keeps the visual TOP-LEFT
+// corner fixed; grows right/down. No-wrap → width = widest line. Wrap → width is
+// kept, height grows with the wrapped line count. Rectangles (no textBox flag)
+// are left alone.
+function _autoSizeTextBox(entry) {
+  if (!entry || !entry.extendData || !entry.extendData.textBox) return;
+  if (!entry.points || entry.points.length < 2) return;
+  const chart = _chartOf(entry.id);
+  if (!chart) return;
+  const handles = computeRectHandlePixels(entry.points[0], entry.points[1], chart);
+  if (!handles) return;
+  const xL = handles[0].x, yT = handles[0].y;                 // TL corner (visual)
+  const xR = handles[3].x;
+  const wrap = !!entry.extendData.wrap;
+  const { w, h } = measureTextBoxPixels(entry.extendData.text, wrap, Math.abs(xR - xL));
+  let br;
+  try { br = chart.convertFromPixel({ x: xL + w, y: yT + h }, { paneId: 'candle_pane' }); }
+  catch (e) { return; }
+  const b = Array.isArray(br) ? br[0] : br;
+  const tl2 = chart.convertFromPixel({ x: xL, y: yT }, { paneId: 'candle_pane' });
+  const a = Array.isArray(tl2) ? tl2[0] : tl2;
+  if (!a || !b || !Number.isFinite(a.value) || !Number.isFinite(b.value)) return;
+  const mk = (p, ref) => {
+    const o = { value: p.value };
+    if (Number.isFinite(p.timestamp)) o.timestamp = p.timestamp;
+    if (Number.isFinite(p.dataIndex)) o.dataIndex = p.dataIndex;
+    return o;
+  };
+  const newPts = [mk(a), mk(b)];
+  try { chart.overrideOverlay({ id: entry.id, points: newPts }); } catch (e) { return; }
+  // Keep the registry (main or mini) canonical points in sync.
+  const reg = Drawing.overlayRegistry.get(entry.id);
+  if (reg) reg.points = newPts;
+  else if (Drawing._miniRegistry) for (const e of Drawing._miniRegistry.values())
+    if (e._ovid === entry.id) { e.points = newPts.map(p => ({ timestamp: p.timestamp, value: p.value })); break; }
+  schedulePersist();
+}
+
 function startRectTextEdit(entry) {
   if (!entry || _rectEditingId === entry.id) return;
   if (!entry.points || entry.points.length < 2) return;
@@ -3882,6 +5344,11 @@ function startRectTextEdit(entry) {
 
   const cur = (entry.extendData && entry.extendData.text) || {};
   const t = { ...DEFAULT_TEXT_STATE, ...cur };
+  const isTB = !!(entry.extendData && entry.extendData.textBox);
+  const tbWrap = isTB && !!entry.extendData.wrap;
+  // Top-left anchor stays fixed while a text box grows right/down as you type.
+  const anchorXL = xL, anchorYT = yT;
+  const PAD = 4;             // must match buildRectTextFigures / measureTextBoxPixels
 
   const chartRect = chartEl.getBoundingClientRect();
   // Container spans the rect bounds and uses flex to place the textarea at
@@ -3893,19 +5360,27 @@ function startRectTextEdit(entry) {
     top:    (chartRect.top  + yT) + 'px',
     width:  (xR - xL) + 'px',
     height: (yB - yT) + 'px',
+    // A text box anchors its text top-left with 4px padding (matching the
+    // rendered label) and grows to fit; a rectangle label flex-centers per
+    // vPos × hAlign inside the fixed box.
     display: 'flex',
-    alignItems:
+    padding: isTB ? PAD + 'px' : '0',
+    alignItems: isTB ? 'flex-start' : (
       t.vPos === 'top'    ? 'flex-start' :
-      t.vPos === 'bottom' ? 'flex-end'   : 'center',
-    justifyContent:
+      t.vPos === 'bottom' ? 'flex-end'   : 'center'),
+    justifyContent: isTB ? 'flex-start' : (
       t.hAlign === 'left'  ? 'flex-start' :
-      t.hAlign === 'right' ? 'flex-end'   : 'center',
+      t.hAlign === 'right' ? 'flex-end'   : 'center'),
+    boxSizing: 'border-box',
     pointerEvents: 'none',   // clicks pass through to textarea / chart
     zIndex: 9999,
   });
   const ta = document.createElement('textarea');
   ta.className = 'rect-inline-editor';
   ta.rows = 1;              // default is 2 → makes scrollHeight=2*lineHeight even when empty
+  // No-wrap text box → the textarea must not soft-wrap either (it grows wider
+  // and the box follows). Wrapping box / rectangle label → soft wrap.
+  ta.wrap = (isTB && !tbWrap) ? 'off' : 'soft';
   ta.value = t.content || '';
   ta.placeholder = (window.I18n && window.I18n.t)
     ? window.I18n.t('tool.addTextEditing') : '新增文字';
@@ -3915,7 +5390,7 @@ function startRectTextEdit(entry) {
     fontWeight:  t.bold ? 900 : 400,
     fontStyle:   t.italic ? 'italic' : 'normal',
     color:       hexToRgba(t.color.hex, t.color.opacity),
-    textAlign:   t.hAlign,
+    textAlign:   isTB ? 'left' : t.hAlign,
     background:  'transparent',
     border:      'none',
     outline:     'none',
@@ -3925,20 +5400,48 @@ function startRectTextEdit(entry) {
     boxSizing:   'border-box',
     lineHeight:  '1.2',
     width:       '100%',
-    maxHeight:   '100%',
+    height:      '100%',
+    maxHeight:   isTB ? 'none' : '100%',
+    whiteSpace:  (isTB && !tbWrap) ? 'pre' : 'pre-wrap',
     overflow:    'hidden',
     pointerEvents: 'auto',
   });
   host.appendChild(ta);
   document.body.appendChild(host);
   _rectEditHost = host;
-  // Auto-grow height to fit content so flex-centering lands on the same line
-  // as the rendered label.
+  const placeholderText = ta.placeholder;
+  // Rectangle label: grow textarea height inside the fixed box.
+  // Text box: resize the OVERLAY (and this host) to fit the text live, keeping
+  // the top-left corner fixed — so the box, its handles and the caret all track
+  // the text as you type (no empty right-hand gap, no overflow past the box).
+  const mkPt = (p) => { const o = { value: p.value };
+    if (Number.isFinite(p.timestamp)) o.timestamp = p.timestamp;
+    if (Number.isFinite(p.dataIndex)) o.dataIndex = p.dataIndex; return o; };
   const autosize = () => {
-    // Collapse to 0 then expand — scrollHeight now reflects *just* the content
-    // (not the default rows=1 placeholder space).
-    ta.style.height = '0';
-    ta.style.height = Math.min(ta.scrollHeight, yB - yT) + 'px';
+    if (!isTB) {
+      ta.style.height = '0';
+      ta.style.height = Math.min(ta.scrollHeight, yB - yT) + 'px';
+      return;
+    }
+    const content = ta.value || '';
+    const fixedW = tbWrap ? (xR - xL) : undefined;
+    const { w, h } = measureTextBoxPixels({ ...t, content: content || placeholderText }, tbWrap, fixedW);
+    host.style.width = w + 'px';
+    host.style.height = h + 'px';
+    const ch = _chartOf(entry.id);
+    let a, b;
+    try {
+      a = ch.convertFromPixel({ x: anchorXL, y: anchorYT }, { paneId: 'candle_pane' });
+      b = ch.convertFromPixel({ x: anchorXL + w, y: anchorYT + h }, { paneId: 'candle_pane' });
+    } catch (e) { return; }
+    const pa = Array.isArray(a) ? a[0] : a, pb = Array.isArray(b) ? b[0] : b;
+    if (!pa || !pb || !Number.isFinite(pa.value) || !Number.isFinite(pb.value)) return;
+    const pts = [mkPt(pa), mkPt(pb)];
+    try { ch.overrideOverlay({ id: entry.id, points: pts }); } catch (e) {}
+    const reg = Drawing.overlayRegistry.get(entry.id);
+    if (reg) reg.points = pts;
+    else if (Drawing._miniRegistry) for (const me of Drawing._miniRegistry.values())
+      if (me._ovid === entry.id) { me.points = pts.map(p => ({ timestamp: p.timestamp, value: p.value })); break; }
   };
   ta.addEventListener('input', autosize);
   autosize();
@@ -3961,11 +5464,24 @@ function startRectTextEdit(entry) {
     host.remove();
     _rectEditingId = null;
     _rectEditHost = null;
+    // An empty text box is discarded — clicking away from a blank box (or never
+    // typing anything) removes it, like PowerPoint. This is NOT recorded on the
+    // undo stack: it never had content, so there's nothing to restore.
+    if (isTB && !newContent.trim()) {
+      try { _chartOf(entry.id).removeOverlay({ id: entry.id }); } catch (e) {}
+      untrackOverlay(entry.id);
+      if (Drawing.selectedOverlay && Drawing.selectedOverlay.id === entry.id) Drawing.selectedOverlay = null;
+      refreshObjectTree();
+      schedulePersist();
+      return;
+    }
     const newText = { ...t, content: newContent };
     const extendData = { ...(entry.extendData || {}), text: newText };
-    try { Drawing.chart.overrideOverlay({ id: entry.id, extendData }); }
+    try { _chartOf(entry.id).overrideOverlay({ id: entry.id, extendData }); }
     catch (e) { /* ignore */ }
     entry.extendData = extendData;
+    // Text box grows/shrinks to fit; rectangles keep their drawn size.
+    if (extendData.textBox) _autoSizeTextBox(Drawing.overlayRegistry.get(entry.id) || entry);
     // If the settings panel is open on this same rect, sync the textarea.
     if (SP.panel && !SP.panel.classList.contains('hidden')
         && Drawing.selectedOverlay && Drawing.selectedOverlay.id === entry.id) {
@@ -3999,15 +5515,27 @@ function startRectTextEdit(entry) {
     host.remove();
     _rectEditingId = null;
     _rectEditHost = null;
-    try { Drawing.chart.overrideOverlay({ id: entry.id, extendData: entry.extendData || {} }); }
+    // Esc on a text box that had no text to begin with → discard it (same as a
+    // blank commit). A text box that already HAS text just reverts the display.
+    if (isTB && !beforeContent.trim()) {
+      try { _chartOf(entry.id).removeOverlay({ id: entry.id }); } catch (e) {}
+      untrackOverlay(entry.id);
+      if (Drawing.selectedOverlay && Drawing.selectedOverlay.id === entry.id) Drawing.selectedOverlay = null;
+      refreshObjectTree();
+      schedulePersist();
+      return;
+    }
+    try { _chartOf(entry.id).overrideOverlay({ id: entry.id, extendData: entry.extendData || {} }); }
     catch (e) { /* ignore */ }
   };
 
   ta.addEventListener('blur', commit);
   ta.addEventListener('keydown', (e) => {
     e.stopPropagation();   // keep global Del/Ctrl+C etc. from firing while typing
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); }
-    else if (e.key === 'Escape')          { e.preventDefault(); cancel(); }
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    // Text box: Enter inserts a newline (PowerPoint-style); commit by clicking
+    // away. Rectangle/trendline label: Enter commits, Shift+Enter newlines.
+    else if (!isTB && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); }
   });
 }
 
@@ -4167,6 +5695,8 @@ function initContextMenu() {
         case 'remove':      removeSelected(); break;
         case 'settings':    showSettings(Drawing.selectedOverlay, getOverlayDisplayName(Drawing.selectedOverlay)); break;
         case 'continue-path': continueSelectedPath(); break;
+        case 'set-target-rr': RrPopup.open(Drawing.selectedOverlay, 'target'); break;
+        case 'set-stop-rr':   RrPopup.open(Drawing.selectedOverlay, 'stop');   break;
       }
       hideContextMenu();
     });
@@ -4180,6 +5710,16 @@ function initContextMenu() {
     if (e.key === 'Escape') hideContextMenu();
   });
   window.addEventListener('blur', hideContextMenu);
+
+  // R:R input popup — capture-phase keydown (beats app.js's tf-popup handler)
+  // + click-outside cancel, mirroring the tf-popup wiring.
+  document.addEventListener('keydown', (e) => RrPopup.handleKey(e), true);
+  document.addEventListener('mousedown', (e) => {
+    const pop = document.getElementById('rr-popup');
+    if (!pop || pop.classList.contains('hidden')) return;
+    if (pop.contains(e.target)) return;
+    RrPopup.hide();
+  }, true);
   window.addEventListener('resize', hideContextMenu);
 }
 
@@ -4282,12 +5822,25 @@ function _initUndoKeybindings() {
 function _fullOverlaySnapshot(ov) {
   if (!ov) return null;
   const bars = (window.App && window.App.currentBars) || [];
-  const points = (ov.points || []).map(p => {
-    const out = { value: p.value };
-    const ts = timestampFromPoint(p, bars);
-    if (Number.isFinite(ts)) out.timestamp = ts;
-    return out;
-  });
+  // Which chart the overlay lived on (+ its branch + registry entry) so undo
+  // recreates it THERE, not on the main chart.
+  const miniChart = window.MiniChart && window.MiniChart.chart;
+  const onMini = !!(miniChart && _chartOf(ov.id) === miniChart);
+  let branchId = null, miniEntry = null;
+  if (onMini && Drawing._miniRegistry) {
+    for (const e of Drawing._miniRegistry.values()) { if (e._ovid === ov.id) { branchId = e.branchId; miniEntry = e; break; } }
+  }
+  // For a mini overlay use the registry's canonical timestamp+value points —
+  // the chart overlay's dataIndex is relative to the MINI's bars, so reading
+  // the timestamp back through the MAIN bars distorts the shape.
+  const points = (onMini && miniEntry && miniEntry.points)
+    ? miniEntry.points.map(p => ({ timestamp: p.timestamp, value: p.value }))
+    : (ov.points || []).map(p => {
+        const out = { value: p.value };
+        const ts = timestampFromPoint(p, bars);
+        if (Number.isFinite(ts)) out.timestamp = ts;
+        return out;
+      });
   return {
     name: ov.name === 'path_snap' ? 'path_done' : ov.name,
     points,
@@ -4295,6 +5848,8 @@ function _fullOverlaySnapshot(ov) {
     extendData: ov.extendData ? JSON.parse(JSON.stringify(ov.extendData)) : undefined,
     lock: !!ov.lock,
     visible: ov.visible !== false,
+    host: onMini ? 'mini' : 'main',
+    branchId,
   };
 }
 
@@ -4303,7 +5858,41 @@ function _fullOverlaySnapshot(ov) {
  *  isn't reusable). Caller pushes the new id back into the action's
  *  mutable holder so subsequent redo can target it. */
 function _recreateFromSnapshot(snap) {
-  if (!snap || !Drawing.chart) return null;
+  if (!snap) return null;
+  // Mini-hosted overlay: recreate on the mini chart + _miniRegistry (never on
+  // main). If the mini is closed we can't restore it visually — bail rather
+  // than leak it onto the main chart.
+  if (snap.host === 'mini') {
+    const miniChart = window.MiniChart && window.MiniChart.chart;
+    if (!miniChart) return null;
+    // Pass canonical {timestamp,value} ONLY — NO explicit dataIndex — exactly
+    // like the main recreate below (_pointsForChart). KLineChart treats a
+    // supplied dataIndex as authoritative and SNAPS the point's value to that
+    // bar, so recreating a delete+undo with an idxByTs dataIndex rewrote the
+    // drawn Y (a free convertFromPixel value) onto the bar — the mini "刪除復原
+    // 位置跑掉" bug (confirmed live: canonical [29628.66,29496.47] came back from
+    // createOverlay-with-dataIndex as [29600.25,29482.75] at +0ms). Letting
+    // KLineChart derive the index from the timestamp keeps the drawn value.
+    const opts = { name: snap.name, points: _pointsForChart(snap.points) };
+    if (snap.styles)     opts.styles     = snap.styles;
+    if (snap.extendData) opts.extendData = snap.extendData;
+    if (snap.lock)       opts.lock       = true;
+    if (snap.visible === false) opts.visible = false;
+    let newId;
+    try { newId = miniChart.createOverlay(opts); } catch (e) { return null; }
+    if (typeof newId !== 'string') return null;
+    if (!Drawing._miniRegistry) Drawing._miniRegistry = new Map();
+    const key = 'm' + (Drawing._miniSeq = (Drawing._miniSeq || 0) + 1);
+    Drawing._miniRegistry.set(key, {
+      key, name: snap.name,
+      points: (snap.points || []).map(p => ({ timestamp: p.timestamp, value: p.value })),
+      styles: snap.styles || undefined, extendData: snap.extendData || undefined,
+      lock: !!snap.lock, visible: snap.visible !== false, branchId: snap.branchId || null, _ovid: newId,
+    });
+    schedulePersist();
+    return newId;
+  }
+  if (!Drawing.chart) return null;
   const opts = { name: snap.name, points: _pointsForChart(snap.points) };
   if (snap.styles)     opts.styles     = snap.styles;
   if (snap.extendData) opts.extendData = snap.extendData;
@@ -4346,6 +5935,11 @@ function refreshContextMenuLabels() {
   const isPath = ov && ov.name === 'path_done';
   document.querySelectorAll('#ctx-menu .path-only').forEach(el => {
     el.classList.toggle('hidden', !isPath);
+  });
+  // RR helpers only make sense on a long/short position box.
+  const isPos = ov && (ov.name === 'long_position' || ov.name === 'short_position');
+  document.querySelectorAll('#ctx-menu .position-only').forEach(el => {
+    el.classList.toggle('hidden', !isPos);
   });
 }
 
@@ -4814,10 +6408,13 @@ const SHORTCUTS_DATA = [
     items: [
       { keys: [['Alt', 'T']], desc: 'tool.trendline' },
       { keys: [['Alt', 'R']], desc: 'tool.rectangle' },
+      { keys: [['Alt', 'C']], desc: 'tool.curve' },
       { keys: [['Alt', 'P']], desc: 'tool.path' },
       { keys: [['Alt', 'M'], ['Shift', 'Click']], desc: 'tool.measure' },
       { keys: [['Alt', 'L']], desc: 'tool.longPosition' },
       { keys: [['Alt', 'S']], desc: 'tool.shortPosition' },
+      { keys: [['Alt', 'F']], desc: 'tool.fiboRetrace' },
+      { keys: [['Alt', 'E']], desc: 'tool.fiboExtension' },
     ],
   },
   {
@@ -5070,6 +6667,7 @@ function openChartSettingsModal() {
 // for unknown overlay names.
 const _OVERLAY_NAME_KEYS = {
   trendline_snap: 'tool.trendline',
+  curve_snap:     'tool.curve',
   rectangle_snap: 'tool.rectangle',
   path_snap:      'tool.path',
   path_done:      'tool.path',
@@ -5078,10 +6676,13 @@ const _OVERLAY_NAME_KEYS = {
   short_position: 'tool.shortPosition',
   fibo_retrace:   'tool.fiboRetrace',
   fibo_extension: 'tool.fiboExtension',
+  fibo_time:      'tool.fiboTime',
 };
 function getOverlayDisplayName(ov) {
   const t = (window.I18n && window.I18n.t) || ((k) => k);
   if (!ov) return t('panel.drawing.title');
+  // A text box is a rectangle_snap under the hood — show it as 文字, not 矩形.
+  if (ov.name === 'rectangle_snap' && ov.extendData && ov.extendData.textBox) return t('tool.text');
   const key = _OVERLAY_NAME_KEYS[ov.name];
   return key ? t(key) : t('panel.drawing.title');
 }
@@ -5107,7 +6708,10 @@ function snapshot(ov) {
 }
 
 function copySelected() {
-  const snap = snapshot(Drawing.selectedOverlay);
+  // _fullOverlaySnapshot (not snapshot) so the clipboard carries the source
+  // overlay's host + branch + canonical mini points — paste then recreates on
+  // the SAME chart it was copied from.
+  const snap = _fullOverlaySnapshot(Drawing.selectedOverlay);
   if (snap) Drawing.clipboard = snap;
 }
 
@@ -5126,34 +6730,96 @@ function translatePoints(points, dt, dv) {
   }));
 }
 
+// Recreate a translated copy of a snapshot on the chart it belongs to, tracked
+// into the right registry — the host-aware primitive behind clone / paste /
+// z-order. A `host:'mini'` snapshot (from _fullOverlaySnapshot) rebuilds on the
+// mini chart + _miniRegistry (branch = the snapshot's own mini branch); a main
+// snapshot rebuilds on the main chart via trackOverlay (branch = active). This
+// deliberately does NOT reuse _recreateFromSnapshot for the main path, because
+// that primitive (shared with delete-undo) leaves branchId unstamped — which
+// would drop a clone/paste out of its branch scope. Returns the new id or null.
+function _createTranslatedCopy(snap, dt, dv) {
+  if (!snap || !snap.points) return null;
+  // Paste/clone runs while Ctrl (or Shift) is still held from the Ctrl+V / Ctrl+D
+  // shortcut. Each point below carries a dataIndex (needed so the copy is
+  // body-DRAGGABLE), and createOverlay runs applySnap on dataIndex-bearing
+  // points — so with Ctrl held the OHLC magnet fires and snaps the copy's
+  // corners onto bars, shifting it in Y (Aaron: "Y 軸與複製前不一樣"). Suppress
+  // the snap for the whole recreate, then restore the real held state.
+  const ss = window.SnapState || {};
+  const savedCtrl = ss.ctrlHeld, savedShift = ss.shiftHeld;
+  ss.ctrlHeld = false; ss.shiftHeld = false;
+  try {
+    return _createTranslatedCopyImpl(snap, dt, dv);
+  } finally {
+    ss.ctrlHeld = savedCtrl; ss.shiftHeld = savedShift;
+  }
+}
+function _createTranslatedCopyImpl(snap, dt, dv) {
+  const pts = translatePoints(snap.points, dt, dv);
+  const extendData = snap.extendData ? JSON.parse(JSON.stringify(snap.extendData)) : undefined;
+  if (snap.host === 'mini') {
+    const miniChart = window.MiniChart && window.MiniChart.chart;
+    if (!miniChart) return null;             // mini closed → can't place it there
+    const data = miniChart.getDataList ? miniChart.getDataList() : [];
+    const idxByTs = (ts) => { let b = 0; for (let i = 0; i < data.length; i++) { if (data[i].timestamp <= ts) b = i; else break; } return b; };
+    const withIdx = pts.map(p => ({ timestamp: p.timestamp, value: p.value, dataIndex: idxByTs(p.timestamp) }));
+    const opts = { name: snap.name, points: withIdx };
+    if (snap.styles) opts.styles = snap.styles;
+    if (extendData)  opts.extendData = extendData;
+    let newId;
+    try { newId = miniChart.createOverlay(opts); } catch (e) { return null; }
+    if (typeof newId !== 'string') return null;
+    if (!Drawing._miniRegistry) Drawing._miniRegistry = new Map();
+    const key = 'm' + (Drawing._miniSeq = (Drawing._miniSeq || 0) + 1);
+    const mbid = snap.branchId || (window.BranchEngine && window.BranchEngine.miniBranchId) || 'main';
+    Drawing._miniRegistry.set(key, {
+      key, name: snap.name,
+      points: pts.map(p => ({ timestamp: p.timestamp, value: p.value })),
+      styles: snap.styles || undefined, extendData: extendData || undefined,
+      lock: false, visible: true, branchId: mbid, _ovid: newId,
+    });
+    schedulePersist();
+    return newId;
+  }
+  if (!Drawing.chart) return null;
+  // Attach a dataIndex per point (like the mini path above) so KLineChart's
+  // native body-drag — which moves the overlay in dataIndex space — can move the
+  // copy. Y stays exact because the OHLC magnet is suppressed by the guard in
+  // the wrapper (createOverlay with a dataIndex would otherwise snap Y whenever
+  // Ctrl is held, which it is during Ctrl+V / Ctrl+D).
+  const data = Drawing.chart.getDataList ? Drawing.chart.getDataList() : [];
+  const idxByTs = (ts) => { let b = 0; for (let i = 0; i < data.length; i++) { if (data[i].timestamp <= ts) b = i; else break; } return b; };
+  const withIdx = pts.map(p => ({ timestamp: p.timestamp, value: p.value, dataIndex: idxByTs(p.timestamp) }));
+  const opts = { name: snap.name, points: withIdx };
+  if (snap.styles) opts.styles = snap.styles;
+  if (extendData)  opts.extendData = extendData;
+  const newId = Drawing.chart.createOverlay(opts);
+  if (typeof newId === 'string') {
+    trackOverlay({ id: newId, name: snap.name, points: withIdx, styles: snap.styles, extendData });
+  }
+  return typeof newId === 'string' ? newId : null;
+}
+
 function pasteAtCrosshair() {
   if (!Drawing.clipboard || !Drawing.chart) return;
   const cb = Drawing.clipboard;
-  const src = cb.points[0];
+  const src = cb.points && cb.points[0];
+  if (!src) return;
   const target = Drawing.lastCrosshair;
-  let pts;
+  let dt, dv;
   if (target && Number.isFinite(target.timestamp) && Number.isFinite(src.timestamp)) {
-    const dt = target.timestamp - src.timestamp;
-    const dv = target.value - src.value;
-    pts = translatePoints(cb.points, dt, dv);
+    dt = target.timestamp - src.timestamp;
+    dv = target.value - src.value;
   } else {
     // Fallback: shift by +5 bars worth of time using current TF
-    const tfMs = guessCurrentTfMs();
-    pts = translatePoints(cb.points, tfMs * 5, 0);
+    dt = guessCurrentTfMs() * 5;
+    dv = 0;
   }
-  const opts = { name: cb.name, points: pts };
-  if (cb.styles)     opts.styles     = cb.styles;
-  if (cb.extendData) opts.extendData = JSON.parse(JSON.stringify(cb.extendData));
-  const pastedId = Drawing.chart.createOverlay(opts);
-  if (typeof pastedId === 'string') {
-    trackOverlay({
-      id: pastedId,
-      name: cb.name,
-      points: pts,
-      styles: cb.styles,
-      extendData: opts.extendData,
-    });
-  }
+  // Host-aware: a mini-copied overlay pastes back onto the mini (its own
+  // registry/branch), a main-copied one onto the main. If the mini was closed
+  // after copy, _createTranslatedCopy returns null and the paste is a no-op.
+  _createTranslatedCopy(cb, dt, dv);
   // Clear JS-side selection so neither the source nor the pasted overlay
   // hijacks the next click. Without this, `Drawing.selectedOverlay` is
   // still the source overlay (from the right-click that triggered copy),
@@ -5167,23 +6833,11 @@ function pasteAtCrosshair() {
 }
 
 function cloneSelected() {
-  const snap = snapshot(Drawing.selectedOverlay);
+  // Host-aware snapshot → recreate on the same chart (mini clone stays on the
+  // mini). Offset +5 bars so the copy doesn't sit exactly on the original.
+  const snap = _fullOverlaySnapshot(Drawing.selectedOverlay);
   if (!snap) return;
-  const tfMs = guessCurrentTfMs();
-  const pts = translatePoints(snap.points, tfMs * 5, 0);
-  const opts = { name: snap.name, points: pts };
-  if (snap.styles)     opts.styles     = snap.styles;
-  if (snap.extendData) opts.extendData = JSON.parse(JSON.stringify(snap.extendData));
-  const clonedId = Drawing.chart.createOverlay(opts);
-  if (typeof clonedId === 'string') {
-    trackOverlay({
-      id: clonedId,
-      name: snap.name,
-      points: pts,
-      styles: snap.styles,
-      extendData: opts.extendData,
-    });
-  }
+  _createTranslatedCopy(snap, guessCurrentTfMs() * 5, 0);
   // Clear selection — same reasoning as pasteAtCrosshair: keeping the
   // source overlay selected would have its handles hijack the next click.
   Drawing.selectedOverlay = null;
@@ -5210,7 +6864,7 @@ function removeSelected() {
   const ov = Drawing.selectedOverlay;
   const snap = _fullOverlaySnapshot(ov);
   const id = ov.id;
-  Drawing.chart.removeOverlay({ id });
+  _chartOf(id).removeOverlay({ id });
   untrackOverlay(id);
   Drawing.selectedOverlay = null;
   refreshObjectTree();
@@ -5225,7 +6879,7 @@ function removeSelected() {
         if (newId) { ref.id = newId; refreshObjectTree(); }
       },
       redo: () => {
-        try { Drawing.chart.removeOverlay({ id: ref.id }); } catch (e) {}
+        try { _chartOf(ref.id).removeOverlay({ id: ref.id }); } catch (e) {}
         untrackOverlay(ref.id);
         if (Drawing.selectedOverlay && Drawing.selectedOverlay.id === ref.id) {
           Drawing.selectedOverlay = null;
@@ -5239,7 +6893,7 @@ function removeSelected() {
 function toggleLock() {
   const ov = Drawing.selectedOverlay;
   if (!ov || !Drawing.chart) return;
-  Drawing.chart.overrideOverlay({ id: ov.id, lock: !ov.lock });
+  _chartOf(ov.id).overrideOverlay({ id: ov.id, lock: !ov.lock });
   ov.lock = !ov.lock;
   updateTrackedOverlay(ov.id, { lock: ov.lock });
 }
@@ -5248,31 +6902,142 @@ function toggleVisible() {
   const ov = Drawing.selectedOverlay;
   if (!ov || !Drawing.chart) return;
   const newVis = ov.visible === false ? true : false;
-  Drawing.chart.overrideOverlay({ id: ov.id, visible: newVis });
+  _chartOf(ov.id).overrideOverlay({ id: ov.id, visible: newVis });
   ov.visible = newVis;
   updateTrackedOverlay(ov.id, { visible: newVis });
   refreshObjectTree();
 }
 
-// Z-order: KLineChart 9.x doesn't expose explicit z-order; later-created overlays
-// render on top. So "to top" = remove + recreate. "To bottom" = remove + recreate
-// after also rotating others (skipped for v1; treats as "to top").
+// =================================================================
+// Z-ORDER — driven by KLineChart's own `zLevel`
+// =================================================================
+// Measured against klinecharts 9.8.10 (probe run in this session):
+//   - the overlay store sorts instances by `zLevel` ascending
+//     (`e.sort((a,b) => a.zLevel - b.zLevel)`), higher = drawn later = on top;
+//   - hit-testing walks the figure children in REVERSE, so topmost wins;
+//   - on mouse ENTER the store calls `instance.setZLevel(Number.MAX_SAFE_INTEGER)`
+//     and NEVER restores it on leave.
+// That last one is the whole bug: a rectangle big enough to cover the chart is
+// unavoidably hovered, sticks at MAX_SAFE_INTEGER forever, and from then on
+// swallows every click - nothing underneath can be selected again. It also
+// explains why re-creating overlays in a chosen order never held: the next
+// hover re-sorted them anyway.
+//
+// Fix = own the zLevel instead of fighting it:
+//   1. give every overlay a stable zLevel ranked by AREA (bigger area -> lower),
+//      so a small object always sits above the rectangle that contains it;
+//   2. restore that zLevel on mouse leave, undoing the MAX_SAFE_INTEGER bump
+//      (hover-on-top while pointing at it is fine - permanent is not).
+// No overlay is recreated, so ids, undo history and persistence are untouched.
+const Z_MANUAL_TOP = 1e6;      // 置頂 / 置底 sit outside the auto-ranked band
+const Z_MANUAL_BOTTOM = -1e6;
+let _zManualSeq = 0;
+
+function _overlayBox(entry) {
+  const pts = entry && entry.points;
+  if (!Array.isArray(pts) || pts.length < 2) return null;
+  // A freshly drawn overlay's points can still be dataIndex-only (timestamp is
+  // filled in later), so resolve through the bars — otherwise its area is
+  // unmeasurable and it sinks to the bottom of the stack.
+  const bars = (window.App && window.App.currentBars) || [];
+  const ts = pts.map(p => timestampFromPoint(p, bars)).filter(Number.isFinite);
+  const vs = pts.map(p => p.value).filter(Number.isFinite);
+  if (ts.length < 2 || vs.length < 2) return null;
+  const t0 = Math.min(...ts), t1 = Math.max(...ts);
+  const v0 = Math.min(...vs), v1 = Math.max(...vs);
+  return { t0, t1, v0, v1, area: (t1 - t0) * (v1 - v0) };
+}
+
+/** Push an overlay's assigned zLevel into the chart (and remember it). */
+function _applyZLevel(entry, z) {
+  const chart = _chartOf(entry.id);
+  const live = chart && chart.getOverlayById && chart.getOverlayById(entry.id);
+  // Compare against the LIVE instance too: if a hover bump slipped through
+  // (overlay tracked but not yet ranked), entry.zLevel can already equal `z`
+  // while the instance sits at MAX_SAFE_INTEGER — skipping the write there would
+  // leave it stuck on top.
+  if (entry.zLevel === z && live && live.zLevel === z) return false;
+  entry.zLevel = z;
+  try { chart.overrideOverlay({ id: entry.id, zLevel: z }); }
+  catch (e) { return false; }
+  return true;
+}
+
+/** Rank every (non-manual) overlay by area: biggest at the bottom. Cheap enough
+ *  to run after any structural change - it only writes when a level changes. */
+function applyAutoZLevels() {
+  if (!Drawing.chart || !Drawing.overlayRegistry) return 0;
+  const ranked = [...Drawing.overlayRegistry.values()]
+    .filter(e => !e.zManual)
+    .map(e => ({ e, area: (_overlayBox(e) || {}).area }))
+    .sort((x, y) => {
+      const ax = Number.isFinite(x.area) ? x.area : Infinity;   // unmeasurable -> keep low
+      const ay = Number.isFinite(y.area) ? y.area : Infinity;
+      return ay - ax;                                           // bigger first = lower
+    });
+  let changed = 0;
+  ranked.forEach((r, i) => { if (_applyZLevel(r.e, i + 1)) changed++; });
+  return changed;
+}
+Drawing.applyAutoZLevels = applyAutoZLevels;
+
+/** Coalesced applyAutoZLevels — many overlays can be tracked back-to-back
+ *  (restore, paste, a programmatic batch draw), and one pass at the
+ *  end of the task is enough. */
+let _autoZPending = false;
+function scheduleAutoZLevels() {
+  if (_autoZPending) return;
+  _autoZPending = true;
+  setTimeout(() => { _autoZPending = false; try { applyAutoZLevels(); } catch (e) {} }, 0);
+}
+Drawing.scheduleAutoZLevels = scheduleAutoZLevels;
+
+/** Write our assigned zLevel straight back onto the live instance, synchronously.
+ *  Called from onMouseEnter, which KLineChart invokes AFTER its
+ *  setZLevel(MAX_SAFE_INTEGER) but BEFORE the re-sort — so the bump never lands.
+ *  Uses the instance's own setter (not overrideOverlay) to stay inside that
+ *  window and avoid a second render pass. */
+function cancelHoverZBump(overlay) {
+  if (!overlay || typeof overlay.setZLevel !== 'function') return;
+  const entry = Drawing.overlayRegistry.get(overlay.id);
+  const z = entry && Number.isFinite(entry.zLevel) ? entry.zLevel : null;
+  if (z == null) return;
+  if (overlay.zLevel !== z) overlay.setZLevel(z);
+}
+Drawing.cancelHoverZBump = cancelHoverZBump;
+
+/** Undo KLineChart's hover bump so "last hovered" doesn't become "permanently
+ *  on top". Belt-and-braces for paths that skip onMouseEnter. */
+function restoreZLevelAfterHover(id) {
+  if (!id) return;
+  const entry = Drawing.overlayRegistry.get(id);
+  if (!entry || !Number.isFinite(entry.zLevel)) return;
+  try { _chartOf(id).overrideOverlay({ id, zLevel: entry.zLevel }); } catch (e) {}
+}
+Drawing.restoreZLevelAfterHover = restoreZLevelAfterHover;
+
+// Alias kept for the call sites added earlier this session (restore / draw end).
+function raiseEnclosedOverlays() { return applyAutoZLevels(); }
+Drawing.raiseEnclosedOverlays = raiseEnclosedOverlays;
+
 function setZOrder(toTop) {
   const ov = Drawing.selectedOverlay;
   if (!ov || !Drawing.chart) return;
-  const snap = snapshot(ov);
-  if (!snap) return;
-  Drawing.chart.removeOverlay({ id: ov.id });
-  if (toTop) {
-    Drawing.chart.createOverlay({ ...snap, lock: ov.lock, visible: ov.visible });
+  // zLevel makes this a one-line property change - no remove+recreate, so the
+  // overlay keeps its id, undo history and branch stamp. (The old code called
+  // chart.getOverlays(), which does NOT exist in klinecharts 9.8.10: it returned
+  // undefined, the whole "rotate the others" branch became a no-op, and 置底
+  // silently did 置頂 instead. That is why it looked like it had no effect.)
+  const entry = Drawing.overlayRegistry.get(ov.id);
+  const z = (toTop ? Z_MANUAL_TOP : Z_MANUAL_BOTTOM) + (toTop ? ++_zManualSeq : -(++_zManualSeq));
+  if (entry) {
+    entry.zManual = true;                    // opt out of the area ranking
+    _applyZLevel(entry, z);
+    schedulePersist();
   } else {
-    // Crude bottom: remove all completed overlays, recreate this one first, then the rest.
-    const all = (Drawing.chart.getOverlays && Drawing.chart.getOverlays()) || [];
-    const others = all.filter(o => o.id !== ov.id).map(snapshot).filter(Boolean);
-    all.forEach(o => Drawing.chart.removeOverlay({ id: o.id }));
-    Drawing.chart.createOverlay({ ...snap, lock: ov.lock, visible: ov.visible });
-    others.forEach(o => Drawing.chart.createOverlay(o));
+    try { _chartOf(ov.id).overrideOverlay({ id: ov.id, zLevel: z }); } catch (e) {}
   }
+  refreshObjectTree();
 }
 
 // =================================================================
@@ -5428,6 +7193,20 @@ function initSettingsPanel(chart) {
   document.getElementById('sp-cancel').addEventListener('click', cancelSettings);
   document.getElementById('sp-confirm').addEventListener('click', confirmSettings);
 
+  // Enter = 確認 while the drawing settings panel is open. Skipped when:
+  //   - focus is in the multi-line text <textarea> (Enter must insert a newline)
+  //   - a sub-popover/modal is open (colour / template / save-as own their keys)
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;          // IME compose → ignore
+    if (!SP.panel || SP.panel.classList.contains('hidden')) return;        // panel not open
+    const ae = document.activeElement;
+    if (ae && ae.tagName === 'TEXTAREA') return;                           // keep newline in text editing
+    const open = id => { const el = document.getElementById(id); return el && !el.classList.contains('hidden'); };
+    if (open('sp-color-pop') || open('sp-template-pop') || open('tpl-save-modal')) return;
+    e.preventDefault();
+    confirmSettings();
+  });
+
   // Tab switching
   SP.panel.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
@@ -5504,6 +7283,13 @@ function initSettingsPanel(chart) {
     });
   }
 
+  // Curve-only toggles: end arrows + tangent extensions (each flips its own
+  // .active and re-applies; applyLive reads them into extendData.curve).
+  ['sp-curve-arrow-left', 'sp-curve-arrow-right', 'sp-curve-extend-left', 'sp-curve-extend-right'].forEach(id => {
+    const b = document.getElementById(id);
+    if (b) b.addEventListener('click', (e) => { e.currentTarget.classList.toggle('active'); applyLive(); });
+  });
+
   // Text tab controls
   document.getElementById('sp-text-content').addEventListener('input', applyLive);
   document.getElementById('sp-text-size').addEventListener('change', applyLive);
@@ -5514,6 +7300,11 @@ function initSettingsPanel(chart) {
       e.currentTarget.classList.toggle('active');
       applyLive();
     });
+  });
+  // Text-box only: background / border / word-wrap toggles.
+  ['sp-textbox-bg-enabled', 'sp-textbox-border-enabled', 'sp-textbox-wrap'].forEach(id => {
+    const cb = document.getElementById(id);
+    if (cb) cb.addEventListener('change', applyLive);
   });
 
   // Drag + outside-click behaviors
@@ -5985,7 +7776,7 @@ function showSettings(overlay, titleText) {
   // 11+ enabled levels, per-level color, background fill, reverse,
   // single-color override. Schema is too different from the
   // trendline/rect/measure panel to share controls.
-  if (overlay.name === 'fibo_retrace' || overlay.name === 'fibo_extension') {
+  if (overlay.name === 'fibo_retrace' || overlay.name === 'fibo_extension' || overlay.name === 'fibo_time') {
     Drawing.selectedOverlay = overlay;
     if (window.FiboSettings) {
       window.FiboSettings.open(overlay);
@@ -6007,8 +7798,33 @@ function showSettings(overlay, titleText) {
   const isRect = overlay.name === 'rectangle_snap';
   const isTrend = overlay.name === 'trendline_snap';
   const isMeasure = overlay.name === 'measure_snap';
+  const isTextBox = isRect && !!(overlay.extendData && overlay.extendData.textBox);
   const hasText = isRect || isTrend || isMeasure;
   SP.panel.querySelector('.tab[data-tab="text"]').classList.toggle('hidden', !hasText);
+  // A text box's background/border live on the 文字 tab (not the shared rect
+  // fill/border), so hide the 樣式 tab and the textbox-only rows accordingly.
+  const styleTab = SP.panel.querySelector('.tab[data-tab="style"]');
+  if (styleTab) styleTab.classList.toggle('hidden', isTextBox);
+  SP.panel.querySelectorAll('.sp-textbox-only').forEach(el => el.classList.toggle('hidden', !isTextBox));
+  if (isTextBox) {
+    const ed = overlay.extendData || {};
+    const bgCb = document.getElementById('sp-textbox-bg-enabled');
+    const bdCb = document.getElementById('sp-textbox-border-enabled');
+    const wrapCb = document.getElementById('sp-textbox-wrap');
+    if (bgCb)   bgCb.checked = !!ed.bgEnabled;
+    if (bdCb)   bdCb.checked = !!ed.borderEnabled;
+    if (wrapCb) wrapCb.checked = !!ed.wrap;
+    // Seed the two swatches (they share the generic openColorPopover machinery,
+    // keyed by SP.colors[target]).
+    const bgC = ed.bgColor || { hex: '#1e222d', opacity: 0.85 };
+    const bdC = ed.borderColor || { hex: '#2962ff', opacity: 1 };
+    SP.colors['textbox-bg'] = { ...bgC };
+    SP.colors['textbox-border'] = { ...bdC };
+    const swBg = SP.panel.querySelector('.color-swatch[data-target="textbox-bg"]');
+    const swBd = SP.panel.querySelector('.color-swatch[data-target="textbox-border"]');
+    if (swBg) swBg.style.background = hexToRgba(bgC.hex, bgC.opacity);
+    if (swBd) swBd.style.background = hexToRgba(bdC.hex, bdC.opacity);
+  }
   // Hide text-alignment row for measure — text always sits centered on the
   // horizontal crosshair, no vPos / hAlign choice.
   const vposRow = document.getElementById('sp-text-vpos');
@@ -6042,6 +7858,19 @@ function showSettings(overlay, titleText) {
     }
   }
 
+  // Curve-only: end arrows + tangent extensions (extendData.curve). Toggle the
+  // rows' visibility every open so they never leak onto a line/rect/measure.
+  const isCurve = overlay.name === 'curve_snap';
+  document.getElementById('sp-row-curve-arrow').classList.toggle('hidden', !isCurve);
+  document.getElementById('sp-row-curve-extend').classList.toggle('hidden', !isCurve);
+  if (isCurve) {
+    const cd = (overlay.extendData && overlay.extendData.curve) || {};
+    document.getElementById('sp-curve-arrow-left').classList.toggle('active', !!cd.arrowLeft);
+    document.getElementById('sp-curve-arrow-right').classList.toggle('active', !!cd.arrowRight);
+    document.getElementById('sp-curve-extend-left').classList.toggle('active', !!cd.extendLeft);
+    document.getElementById('sp-curve-extend-right').classList.toggle('active', !!cd.extendRight);
+  }
+
   // Populate panel from current overlay state
   loadStateIntoPanel(overlay);
 
@@ -6068,16 +7897,21 @@ function hideSettings() {
 }
 
 function cancelSettings() {
-  // Revert to snapshot
+  // Revert to snapshot. applyLive already mirrored the live preview into the
+  // registry (main or _miniRegistry), so cancel must revert BOTH the chart the
+  // overlay lives on AND its registry entry — route via _chartOf /
+  // updateTrackedOverlay so a mini overlay reverts on the mini, not the main.
   if (SP.originalState && Drawing.selectedOverlay && Drawing.chart) {
-    Drawing.chart.overrideOverlay({
-      id: Drawing.selectedOverlay.id,
+    const id = Drawing.selectedOverlay.id;
+    const revert = {
       styles: SP.originalState.styles,
       visible: SP.originalState.visible,
       lock: SP.originalState.lock,
       extendData: SP.originalState.extendData,
-    });
+    };
+    _chartOf(id).overrideOverlay({ id, ...revert });
     Drawing.selectedOverlay.extendData = SP.originalState.extendData;
+    updateTrackedOverlay(id, revert);
   }
   SP.originalState = null;
   hideSettings();
@@ -6109,17 +7943,15 @@ function confirmSettings() {
       pushUndo({
         label: 'Edit overlay style',
         undo: () => {
-          try { Drawing.chart.overrideOverlay({ id, ...beforeFrozen }); } catch (e) {}
-          const e2 = Drawing.overlayRegistry.get(id);
-          if (e2) Object.assign(e2, beforeFrozen);
+          try { _chartOf(id).overrideOverlay({ id, ...beforeFrozen }); } catch (e) {}
+          updateTrackedOverlay(id, beforeFrozen);
           if (Drawing.selectedOverlay && Drawing.selectedOverlay.id === id) {
             Object.assign(Drawing.selectedOverlay, beforeFrozen);
           }
         },
         redo: () => {
-          try { Drawing.chart.overrideOverlay({ id, ...after }); } catch (e) {}
-          const e2 = Drawing.overlayRegistry.get(id);
-          if (e2) Object.assign(e2, after);
+          try { _chartOf(id).overrideOverlay({ id, ...after }); } catch (e) {}
+          updateTrackedOverlay(id, after);
           if (Drawing.selectedOverlay && Drawing.selectedOverlay.id === id) {
             Object.assign(Drawing.selectedOverlay, after);
           }
@@ -6248,9 +8080,40 @@ function applyLive() {
       const cb = document.getElementById('sp-border-enabled');
       patch.extendData.borderEnabled = !!(cb && cb.checked);
     }
+    // Text box: its background/border/wrap live on extendData (not the shared
+    // rect fill/border styles).
+    if (patch.extendData.textBox) {
+      const bgCb = document.getElementById('sp-textbox-bg-enabled');
+      const bdCb = document.getElementById('sp-textbox-border-enabled');
+      const wrapCb = document.getElementById('sp-textbox-wrap');
+      const prevWrap = !!patch.extendData.wrap;
+      patch.extendData.bgEnabled = !!(bgCb && bgCb.checked);
+      patch.extendData.borderEnabled = !!(bdCb && bdCb.checked);
+      patch.extendData.wrap = !!(wrapCb && wrapCb.checked);
+      patch.extendData.bgColor = SP.colors['textbox-bg'] || patch.extendData.bgColor;
+      patch.extendData.borderColor = SP.colors['textbox-border'] || patch.extendData.borderColor;
+      ov.extendData = patch.extendData;
+      _chartOf(ov.id).overrideOverlay(patch);
+      ov.visible = st.visible; ov.lock = st.locked; ov.styles = styles;
+      updateTrackedOverlay(ov.id, { visible: st.visible, lock: st.locked, styles, extendData: patch.extendData });
+      // Toggling wrap changes the box geometry (fixed-width vs auto-grow).
+      if (prevWrap !== patch.extendData.wrap) _autoSizeTextBox(Drawing.overlayRegistry.get(ov.id) || ov);
+      captureInheritedStyle(ov.name, styles, ov.extendData);
+      return;
+    }
+    ov.extendData = patch.extendData;
+  } else if (ov.name === 'curve_snap') {
+    const on = (id) => { const b = document.getElementById(id); return !!(b && b.classList.contains('active')); };
+    patch.extendData = {
+      ...(ov.extendData || {}),
+      curve: {
+        arrowLeft: on('sp-curve-arrow-left'), arrowRight: on('sp-curve-arrow-right'),
+        extendLeft: on('sp-curve-extend-left'), extendRight: on('sp-curve-extend-right'),
+      },
+    };
     ov.extendData = patch.extendData;
   }
-  Drawing.chart.overrideOverlay(patch);
+  _chartOf(ov.id).overrideOverlay(patch);
   ov.visible = st.visible;
   ov.lock = st.locked;
   ov.styles = styles;
@@ -6431,6 +8294,7 @@ const SVG_DRAW_ICONS = {
   rectangle_snap: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="6" width="16" height="12"/></svg>',
   path_snap:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="3 18 9 10 14 14 21 4"/></svg>',
   path_done:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="3 18 9 10 14 14 21 4"/></svg>',
+  text_box:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 7 H19"/><path d="M12 7 V18"/></svg>',
   _default:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/></svg>',
 };
 const SVG_IND_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="3" y1="20" x2="3" y2="4"/><rect x="6" y="10" width="3" height="10" fill="currentColor"/><rect x="12" y="14" width="3" height="6" fill="currentColor"/><rect x="18" y="6" width="3" height="14" fill="currentColor"/></svg>';
@@ -6478,7 +8342,15 @@ function refreshObjectTree() {
     const tb = b.points?.[0]?.timestamp || 0;
     return tb - ta;         // newest first
   });
-  if (!sortedOverlays.length && !indList.length) {
+  // Mini (sub-chart) overlays live in a SEPARATE registry. List them too so the
+  // object tree shows "all objects" — each keeps its branch badge, and a 副圖
+  // group label separates them. Empty/incomplete entries (no points) skipped.
+  const miniEntries = Drawing._miniRegistry
+    ? [...Drawing._miniRegistry.values()].filter(e => e && e.points && e.points.length >= 2)
+        .sort((a, b) => (b.points[0]?.timestamp || 0) - (a.points[0]?.timestamp || 0))
+    : [];
+
+  if (!sortedOverlays.length && !indList.length && !miniEntries.length) {
     const empty = document.createElement('div');
     empty.className = 'obj-empty';
     empty.textContent = (window.I18n && window.I18n.t)
@@ -6488,25 +8360,99 @@ function refreshObjectTree() {
     return;
   }
   for (const ov of sortedOverlays) {
-    list.appendChild(makeOverlayRow(ov));
+    list.appendChild(makeOverlayRow(ov, 'main'));
+  }
+  if (miniEntries.length) {
+    const label = document.createElement('div');
+    label.className = 'obj-tree-group-label';
+    label.textContent = (window.I18n && window.I18n.lang === 'en') ? 'Sub-chart' : '副圖物件';
+    list.appendChild(label);
+    for (const e of miniEntries) list.appendChild(makeOverlayRow(e, 'mini'));
   }
 }
 
-function makeOverlayRow(ov) {
-  const row = document.createElement('div');
-  row.className = 'obj-row';
-  row.dataset.overlayId = ov.id;
-  if (ov.visible === false) row.classList.add('disabled');
+// Branch-kind colors — mirror branch_panel.js KIND_COLORS so the object-tree
+// badge matches the branch panel's dots.
+const BRANCH_KIND_COLORS = {
+  main: '#5a6478', exec: '#089981', direction: '#ef5350',
+  sandbox: '#7d6cbf', archived: '#3a3f4b',
+};
+// Escape user-provided text (branch names are user-renamable) before it goes
+// into innerHTML — covers both text nodes and double-quoted attributes.
+function _esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+// Format an overlay's creation timestamp for the object-tree row tooltip, in the
+// chart's display timezone (ET) so it matches the x-axis. e.g. "2023-05-11 06:00 ET".
+function _fmtOverlayTime(ts) {
+  if (!Number.isFinite(ts)) return '';
+  try {
+    const p = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(new Date(ts)).reduce((o, x) => (o[x.type] = x.value, o), {});
+    return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ET`;
+  } catch (e) { return new Date(ts).toISOString(); }
+}
 
-  const icon = SVG_DRAW_ICONS[ov.name] || SVG_DRAW_ICONS._default;
+// Resolve the branch an overlay belongs to → { name, color } for its badge.
+// null / 'main' branchId → 主線 (the drawing lives on the main timeline).
+function _overlayBranchBadge(branchId) {
+  const BE = window.BranchEngine;
+  const id = branchId || 'main';
+  const b = BE && BE.getBranch ? BE.getBranch(id) : null;
+  const kind = b ? (b.kind || 'exec') : 'main';
+  let name;
+  if (b && b.name) name = b.name;
+  else if (id === 'main') name = (window.I18n && window.I18n.t) ? window.I18n.t('branch.kindMain') : '主線';
+  else name = id;   // branch was deleted but overlay still tagged — show the id
+  return { name, color: BRANCH_KIND_COLORS[kind] || BRANCH_KIND_COLORS.main };
+}
+
+// Select a MINI overlay from a tree row: open the mini for its branch (which
+// makes it live + assigns _ovid via renderMiniBranchOverlays), then select it.
+function selectMiniOverlayFromTree(entry) {
+  _ensureMiniOpenForBranch(entry.branchId);
+  refreshObjectTree();                      // rows now carry the live _ovid
+  if (entry._ovid) selectOverlayFromTree(entry._ovid);
+}
+
+// host: 'main' → `ov` is an overlayRegistry entry (id = ov.id); 'mini' → `ov` is
+// a _miniRegistry entry (live id = ov._ovid, null while the mini is closed).
+function makeOverlayRow(ov, host) {
+  host = host || 'main';
+  const isMini = host === 'mini';
+  const id = isMini ? ov._ovid : ov.id;
+
+  const row = document.createElement('div');
+  row.className = 'obj-row' + (isMini ? ' is-mini' : '');
+  if (id) row.dataset.overlayId = id;
+  row.dataset.host = host;
+  if (isMini && ov.key) row.dataset.miniKey = ov.key;
+  if (ov.visible === false) row.classList.add('disabled');
+  // Persist the selected highlight across refreshObjectTree rebuilds.
+  if (id && Drawing.selectedOverlay && Drawing.selectedOverlay.id === id) row.classList.add('selected');
+  // Hover tooltip → the timestamp the object was created at (ET, matches the axis).
+  const _t0 = ov.points && ov.points[0] && ov.points[0].timestamp;
+  if (Number.isFinite(_t0)) row.title = _fmtOverlayTime(_t0);
+
+  const isTextBoxRow = ov.name === 'rectangle_snap' && ov.extendData && ov.extendData.textBox;
+  const icon = (isTextBoxRow ? SVG_DRAW_ICONS.text_box : SVG_DRAW_ICONS[ov.name]) || SVG_DRAW_ICONS._default;
   const name = getOverlayDisplayName(ov);
   const t_ = (k) => (window.I18n && window.I18n.t) ? window.I18n.t(k) : k;
   const eyeTitle = ov.visible === false ? t_('common.show') : t_('common.hide');
   const removeTitle = t_('common.remove');
+  const badge = _overlayBranchBadge(ov.branchId);
+  const badgeHtml = `<span class="obj-branch" title="${_esc(badge.name)}">`
+    + `<span class="obj-branch-dot" style="background:${badge.color}"></span>`
+    + `<span class="obj-branch-name">${_esc(badge.name)}</span></span>`;
 
   row.innerHTML = `
     <span class="obj-icon">${icon}</span>
     <span class="obj-name">${name}</span>
+    ${badgeHtml}
     <div class="obj-actions">
       <button class="icon-btn" data-act="eye" title="${eyeTitle}">
         ${ov.visible === false ? SVG_EYE_OFF : SVG_EYE_ON}
@@ -6515,41 +8461,101 @@ function makeOverlayRow(ov) {
     </div>
   `;
 
+  // Eye — toggle visibility. `ov` is the registry entry (main OR mini), so
+  // ov.visible persists; also override the live overlay if one exists (a mini
+  // overlay may be closed → registry-only toggle takes effect on next show).
   row.querySelector('[data-act="eye"]').addEventListener('click', () => {
     const newVis = ov.visible === false ? true : false;
-    Drawing.chart.overrideOverlay({ id: ov.id, visible: newVis });
     ov.visible = newVis;
-    updateTrackedOverlay(ov.id, { visible: newVis });
+    if (id) { try { _chartOf(id).overrideOverlay({ id, visible: newVis }); } catch (e) {} }
+    schedulePersist();
     refreshObjectTree();
   });
+
+  // Delete — chart-aware, with undo.
   row.querySelector('[data-act="del"]').addEventListener('click', () => {
+    if (isMini) {
+      const snap = {
+        name: ov.name,
+        points: (ov.points || []).map(p => ({ timestamp: p.timestamp, value: p.value })),
+        styles: ov.styles, extendData: ov.extendData,
+        lock: !!ov.lock, visible: ov.visible !== false,
+        host: 'mini', branchId: ov.branchId || null,
+      };
+      if (id) { try { _chartOf(id).removeOverlay({ id }); } catch (e) {} }
+      if (Drawing._miniRegistry && ov.key) Drawing._miniRegistry.delete(ov.key);
+      if (id && Drawing.selectedOverlay && Drawing.selectedOverlay.id === id) Drawing.selectedOverlay = null;
+      schedulePersist();
+      refreshObjectTree();
+      const ref = { ovid: null };
+      pushUndo({
+        label: 'Delete overlay',
+        undo: () => { const nid = _recreateFromSnapshot(snap); if (nid) { ref.ovid = nid; refreshObjectTree(); } },
+        redo: () => {
+          if (ref.ovid) {
+            const mini = window.MiniChart && window.MiniChart.chart;
+            if (mini) { try { mini.removeOverlay({ id: ref.ovid }); } catch (e) {} }
+            if (Drawing._miniRegistry) for (const [k, e] of Drawing._miniRegistry) { if (e._ovid === ref.ovid) { Drawing._miniRegistry.delete(k); break; } }
+          }
+          schedulePersist();
+          refreshObjectTree();
+        },
+      });
+      return;
+    }
+    // Main overlay
     const snap = _fullOverlaySnapshot(ov);
-    Drawing.chart.removeOverlay({ id: ov.id });
-    untrackOverlay(ov.id);
-    if (Drawing.selectedOverlay && Drawing.selectedOverlay.id === ov.id) {
+    if (id) { try { _chartOf(id).removeOverlay({ id }); } catch (e) {} }
+    untrackOverlay(id);
+    if (Drawing.selectedOverlay && Drawing.selectedOverlay.id === id) {
       Drawing.selectedOverlay = null;
     }
     refreshObjectTree();
     if (snap) {
-      const ref = { id: ov.id };
+      const ref = { id };
       pushUndo({
         label: 'Delete overlay',
-        undo: () => {
-          const newId = _recreateFromSnapshot(snap);
-          if (newId) { ref.id = newId; refreshObjectTree(); }
-        },
-        redo: () => {
-          try { Drawing.chart.removeOverlay({ id: ref.id }); } catch (e) {}
-          untrackOverlay(ref.id);
-          refreshObjectTree();
-        },
+        undo: () => { const newId = _recreateFromSnapshot(snap); if (newId) { ref.id = newId; refreshObjectTree(); } },
+        redo: () => { try { _chartOf(ref.id).removeOverlay({ id: ref.id }); } catch (e) {} untrackOverlay(ref.id); refreshObjectTree(); },
       });
     }
   });
+
+  // Row click → select on its chart. A mini overlay opens the mini for its
+  // branch first (so it becomes live + visible), then selects (Aaron's spec:
+  // left-click a sub-chart object auto-opens the sub-chart).
   row.addEventListener('click', (e) => {
-    // Clicking the row (but not action buttons) selects the overlay
     if (e.target.closest('.icon-btn')) return;
-    Drawing.selectedOverlay = ov;
+    if (isMini) selectMiniOverlayFromTree(ov);
+    else selectOverlayFromTree(ov.id);
+  });
+
+  // Right click → 設定… / 跳轉至該物件位置. For a mini object both actions open
+  // the mini first (settings needs the LIVE overlay, which only exists once the
+  // mini is rendered); the jump also scrolls the K-bars.
+  row.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const ts = (ov.points && ov.points[0] && Number.isFinite(ov.points[0].timestamp)) ? ov.points[0].timestamp : null;
+    const lang = (window.I18n && window.I18n.lang) || 'zh';
+    const t_ = (k, fb) => (window.I18n && window.I18n.t) ? window.I18n.t(k) : fb;
+    _showTreeCtxMenu(e.pageX, e.pageY, [
+      {
+        label: t_('ctx.settings', lang === 'en' ? 'Settings…' : '設定…'),
+        onClick: () => {
+          // Select exactly like a row click, then open the dialog on the live
+          // overlay — showSettings routes position/fibo to their own panels.
+          if (isMini) selectMiniOverlayFromTree(ov);
+          else selectOverlayFromTree(ov.id);
+          const sel = Drawing.selectedOverlay;
+          if (sel && sel.name) showSettings(sel, getOverlayDisplayName(sel));
+        },
+      },
+      {
+        label: lang === 'en' ? 'Jump to object' : '跳轉至該物件位置',
+        onClick: () => jumpToOverlay(host, ov.branchId, ts),
+      },
+    ]);
   });
 
   return row;
@@ -6712,6 +8718,7 @@ Drawing.reanchorOverlaysWithDataIndex = reanchorOverlaysWithDataIndex;
 Drawing.init = init;
 Drawing.setTool = setTool;
 Drawing.showSettings = showSettings;
+Drawing.startRectTextEdit = startRectTextEdit;
 Drawing.updateTrackedOverlay = updateTrackedOverlay;
 // Generic color picker — exposed so the per-overlay position dialog can
 // reuse the existing palette / custom / opacity popover instead of an
@@ -6921,8 +8928,9 @@ const FiboSettings = {
     }
 
     // Title.
-    const titleKey = overlay.name === 'fibo_extension'
-                     ? 'panel.fibo.titleExtension' : 'panel.fibo.titleRetrace';
+    const titleKey = overlay.name === 'fibo_time'      ? 'panel.fibo.titleTime'
+                   : overlay.name === 'fibo_extension' ? 'panel.fibo.titleExtension'
+                   :                                     'panel.fibo.titleRetrace';
     document.getElementById('fibo-ov-title').textContent = this._t(titleKey);
 
     // Trend-line row applies to both retrace (p1→p2 dashed connector) and
@@ -7057,8 +9065,16 @@ const FiboSettings = {
       const base = original[i] || {};
       const value = parseFloat(priceEl.value);
       const idx   = parseInt(barEl.value, 10);
-      // Convert dataIndex → timestamp via current bars table.
-      const bars = (window.App && window.App.currentBars) || [];
+      // Convert dataIndex → timestamp via the ACTIVE bar table. In replay the
+      // point's dataIndex is baseBars-relative (the chart shows displayBars, but
+      // overlay indices map to baseBars); using App.currentBars (the recent
+      // window) here would look up the WRONG bar and corrupt the timestamp —
+      // which collapses the X-projected fibo_time on any settings edit while a
+      // price fibo (Y-dominant) survives.
+      const R = window.Replay;
+      const bars = (R && R.active && Array.isArray(R.baseBars) && R.baseBars.length)
+        ? R.baseBars
+        : ((window.App && window.App.currentBars) || []);
       let timestamp = base.timestamp;
       if (Number.isFinite(idx) && bars[idx]) timestamp = bars[idx].timestamp;
       return {
@@ -7080,6 +9096,9 @@ const FiboSettings = {
     const patch = { id: ov.id, extendData: newExtend };
     if (newPoints) patch.points = newPoints;
     try { Drawing.chart.overrideOverlay(patch); } catch (e) {}
+    // Remember this as the last-used config for THIS fibo family (fibo_time has
+    // its own store) so the next same-kind fibo inherits it.
+    if (Drawing._saveLastUsedFibo) Drawing._saveLastUsedFibo(fibo, levels, ov.name);
     // Live mutation of the in-memory overlay so subsequent reads see the
     // updated state without waiting for a confirm.
     ov.extendData = newExtend;
@@ -7140,18 +9159,36 @@ const FiboSettings = {
   },
 
   // ----- Template management -----
-  // localStorage key for user-saved templates. Default template is the
-  // built-in FIBO_LEVEL_DEFAULTS / FIBO_CONFIG_DEFAULTS — never stored.
-  _TPL_KEY: 'chart_viewer.fibo_templates',
+  // Fibo templates persist SERVER-SIDE (user_data/templates.json) under the
+  // `fibo` bucket, via the same shared store the trendline/rectangle templates
+  // use (_loadAll / _saveAll → localStorage cache + PUT /api/templates + boot
+  // sync). Previously they lived in a localStorage-only key, so they were lost
+  // whenever localStorage was cleared / a different context was used and never
+  // reached the server — hence "saved but not retained after restart". The
+  // built-in default (FIBO_*_DEFAULTS) is never stored.
+  _TPL_LEGACY_KEY: 'chart_viewer.fibo_templates',   // migration source only
+  _TPL_BUCKET: 'fibo',
   _loadTemplates() {
     try {
-      const raw = localStorage.getItem(this._TPL_KEY);
-      const arr = raw ? JSON.parse(raw) : [];
-      return Array.isArray(arr) ? arr : [];
+      const all = _loadAll();
+      const arr = all[this._TPL_BUCKET];
+      if (Array.isArray(arr)) return arr;
+      // One-time migration from the old localStorage-only store.
+      const raw = localStorage.getItem(this._TPL_LEGACY_KEY);
+      const legacy = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(legacy) && legacy.length) {
+        this._saveTemplates(legacy);   // push into the shared store + server
+        return legacy;
+      }
+      return [];
     } catch (e) { return []; }
   },
   _saveTemplates(arr) {
-    try { localStorage.setItem(this._TPL_KEY, JSON.stringify(arr)); } catch (e) {}
+    try {
+      const all = _loadAll();
+      all[this._TPL_BUCKET] = arr;
+      _saveAll(all);                   // writes localStorage cache AND PUTs to /api/templates
+    } catch (e) {}
   },
   _renderTemplateList() {
     const pop = document.getElementById('fibo-tpl-popover');
@@ -7189,6 +9226,9 @@ const FiboSettings = {
       ...(this.currentOverlay.extendData || {}),
       fibo, levels,
     };
+    // Applying a template makes it the last-used config → next same-kind fibo
+    // inherits it (per-family store).
+    if (Drawing._saveLastUsedFibo) Drawing._saveLastUsedFibo(fibo, levels, this.currentOverlay && this.currentOverlay.name);
     // Re-populate UI from the new template, then live-push to overlay.
     this.open(this.currentOverlay);
   },

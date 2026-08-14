@@ -551,6 +551,29 @@
         if (inp) inp.addEventListener('input', () => this.refresh());
       });
 
+      // sim-multi-tp-feature: persisted qty increment ("單位"). The step
+      // field drives the qty spinner's increment and is remembered across
+      // sessions, so the trader isn't stuck stepping by the contract's
+      // raw 0.01 granularity.
+      const qtyStepInp = document.getElementById('sim-qty-step');
+      if (qtyStepInp) {
+        qtyStepInp.value = String(this._qtyUnit(Controller.spec || {}));
+        qtyStepInp.addEventListener('change', () => {
+          let v = parseFloat(qtyStepInp.value);
+          if (!Number.isFinite(v) || v <= 0) {
+            v = (Controller.spec && Controller.spec.qtyStep) || 1;
+            qtyStepInp.value = String(v);
+          }
+          this._setQtyUnit(v);
+          const q = document.getElementById('sim-qty');
+          if (q) {
+            q.step = String(v); q.min = String(v);
+            if ((parseFloat(q.value) || 0) < v) q.value = String(v);
+          }
+          this.refresh();
+        });
+      }
+
       // CTAs
       document.getElementById('sim-cta-buy').addEventListener('click', () => this.submit('buy'));
       document.getElementById('sim-cta-sell').addEventListener('click', () => this.submit('sell'));
@@ -608,6 +631,15 @@
       // entry price is fixed once the order fills.
       this._wireTicketDrag(this._ticketTp, 'tp');
       this._wireTicketDrag(this._ticketSl, 'sl');
+
+      // sim-multi-tp-feature: the panel-side "exit levels" list. The
+      // ＋停利 / ＋停損 buttons append a reduce-only leg to the current
+      // position's committed bracket (per-row qty/price edits + 🗑 are
+      // wired per-render inside _renderExitLevels).
+      const addTp = document.getElementById('sim-exit-add-tp');
+      const addSl = document.getElementById('sim-exit-add-sl');
+      if (addTp) addTp.addEventListener('click', () => this._addExitLevel('tp'));
+      if (addSl) addSl.addEventListener('click', () => this._addExitLevel('sl'));
 
       // bracket-ux-polish §3: vertical rail + 3 dots. Cached refs so
       // the per-tick sync can update each dot's `top` without lookups.
@@ -786,6 +818,19 @@
         }
       }
 
+      // Dynamic per-leg committed tickets (sim-multi-tp-feature). These
+      // are NOT the hardcoded tp/sl tickets, so without this they'd stay
+      // pinned at their last refresh() Y and drift off their line on a raw
+      // zoom / pan. Re-position each from its engine order's live price.
+      if (this._legTickets) {
+        for (const [orderId, el] of this._legTickets) {
+          if (el.hidden) continue;
+          const order = eng.getOrder(orderId);
+          if (!order) continue;
+          push(el, order.type === 'limit' ? order.price : order.stopPrice);
+        }
+      }
+
       // No visible elements → idle path: zero convertToPixel work.
       if (!queries.length) return;
 
@@ -938,6 +983,16 @@
     _renderEntryView(symbol) {
       const bar = Controller.getLatestBar();
       const spec = Controller.spec || {};
+      // Keep the entry qty input's step/min on the trader's chosen unit
+      // (persisted; falls back to the contract qtyStep). Using it as
+      // step AND min lets whole numbers validate and makes the spinner
+      // increment by the unit instead of 0.01.
+      const qtyInpEl = document.getElementById('sim-qty');
+      if (qtyInpEl) {
+        const us = String(this._qtyUnit(spec));
+        if (qtyInpEl.step !== us) qtyInpEl.step = us;
+        if (qtyInpEl.min !== us) qtyInpEl.min = us;
+      }
       const halfSpread = (spec.spread || 0) / 2;
       const close = bar ? bar.close : null;
       const bid = (close != null) ? close - halfSpread : null;
@@ -1048,6 +1103,246 @@
       // inside _syncBracketTickets: drop sources hide once their leg
       // is populated; 確認/捨棄 hide when there's nothing to confirm.
       this._syncBracketTickets(pos, showConfirmButtons);
+
+      // sim-multi-tp-feature: render the structured exit-levels list from
+      // the committed bracket children (see method for the reduce-only
+      // conversion semantics).
+      this._renderExitLevels(pos);
+    },
+
+    // ================= Multi-segment exit levels =================
+    // The panel-side "exit levels" list (TradingView-style). It is the
+    // manager for a position's COMMITTED bracket legs: one editable row
+    // per pending child order (limit = TP, stop = SL). The first TP+SL is
+    // still armed via the chart-side drag proposal; once committed this
+    // list takes over — add TP2/TP3, edit any leg's qty (partial exit) or
+    // price, or 🗑 a leg. The on-chart bands (sim_overlays) already render
+    // every committed leg, so the chart lines stay draggable for price.
+    //
+    // Reduce-only conversion: the drag-commit path OCO-links the single
+    // TP↔SL pair (TP fill cancels SL). That is WRONG for a partial exit /
+    // multi-TP bracket — a partial TP1 fill would cancel the whole SL and
+    // leave the runner unprotected. So ANY mutation through this list
+    // strips ocoSiblingId off every leg of the parent, handing exit
+    // governance to the engine's reduce-only group (_reconcileExitLegs
+    // clamps survivors to the still-open qty). A full-size TP that closes
+    // the position still cleans up its SL via _cancelDanglingChildrenFor,
+    // so dropping OCO is safe in the single-pair case too.
+
+    /** Collect the committed TP (limit) + SL (stop) legs of `pos`'s
+     *  bracket, each sorted nearest-to-entry first. */
+    _exitLegsOf(pos) {
+      const eng = Controller.engine;
+      const parentId = pos && pos.entryOrderIds && pos.entryOrderIds[0];
+      if (parentId == null) return { parentId: null, tps: [], sls: [] };
+      const legs = eng.getPendingOrders().filter(o =>
+        o.bracketParentId === parentId &&
+        (o.type === 'limit' || o.type === 'stop'));
+      const entry = pos.avgEntryPrice;
+      const near = (o) => Math.abs((o.type === 'limit' ? o.price : o.stopPrice) - entry);
+      const tps = legs.filter(o => o.type === 'limit').sort((a, b) => near(a) - near(b));
+      const sls = legs.filter(o => o.type === 'stop').sort((a, b) => near(a) - near(b));
+      return { parentId, tps, sls };
+    },
+
+    /** Drop OCO links so the bracket becomes a reduce-only group. */
+    _stripBracketOco(parentId) {
+      const eng = Controller.engine;
+      for (const o of eng.getPendingOrders()) {
+        if (o.bracketParentId === parentId) o.ocoSiblingId = null;
+      }
+    },
+
+    /** Commit the mutation: re-price fills on this bar, redraw, re-render. */
+    _afterExitMutation() {
+      Controller._tickNow();
+      Controller._markDirty();
+      Overlays.sync();
+      this.refresh();          // rebuilds position view incl. exit levels
+    },
+
+    /** The trader's preferred qty increment ("單位"), persisted across
+     *  sessions. Falls back to the contract's qtyStep. Used as step/min on
+     *  both the entry qty input and the exit-level qty inputs. */
+    _qtyUnit(spec) {
+      try {
+        const v = parseFloat(localStorage.getItem('sim.qtyUnit'));
+        if (Number.isFinite(v) && v > 0) return v;
+      } catch (e) { /* private mode / no storage */ }
+      return (spec && spec.qtyStep) || (Controller.spec && Controller.spec.qtyStep) || 1;
+    },
+    _setQtyUnit(v) {
+      try { localStorage.setItem('sim.qtyUnit', String(v)); } catch (e) { /* ignore */ }
+    },
+
+    _renderExitLevels(pos) {
+      const sec  = document.getElementById('sim-exit-levels');
+      const rows = document.getElementById('sim-exit-rows');
+      const cov  = document.getElementById('sim-exit-coverage');
+      if (!sec || !rows) return;
+      const t_ = (window.I18n && window.I18n.t) || ((k) => k);
+      const { parentId, tps, sls } = this._exitLegsOf(pos);
+
+      // The list only manages a bracket once it exists — the first
+      // TP+SL is armed via the chart-side drag proposal, which keeps this
+      // panel out of the zero-leg proposal state machine entirely.
+      if (parentId == null || (!tps.length && !sls.length)) {
+        sec.hidden = true;
+        rows.innerHTML = '';
+        return;
+      }
+      sec.hidden = false;
+      rows.innerHTML = '';
+
+      const openQty = pos.qty || 0;
+      // Qty granularity comes from the contract (qtyStep). Using it as the
+      // input's `step`/`min` is what lets whole numbers through — a hard
+      // `min=0.01 step=1` would make the browser reject "3" (only .01,
+      // 1.01, 2.01 … are valid on that grid).
+      const qtyStep = this._qtyUnit(Controller.spec);
+      const legRow = (o, kind, idx) => {
+        const price = (o.type === 'limit') ? o.price : o.stopPrice;
+        const pct = openQty > 0 ? Math.round((o.qty / openQty) * 100) : 0;
+        const row = document.createElement('div');
+        row.className = 'sim-exit-row ' + kind;
+        row.dataset.orderId = o.id;
+        row.dataset.kind = kind;
+
+        const tag = document.createElement('span');
+        tag.className = 'sim-exit-tag';
+        tag.textContent = (kind === 'tp' ? 'TP' : 'SL') + idx;
+
+        const priceInp = document.createElement('input');
+        priceInp.type = 'number'; priceInp.className = 'sim-exit-price';
+        priceInp.step = String((Controller.spec && Controller.spec.tickSize) || 0.25);
+        priceInp.value = Number.isFinite(price) ? price : '';
+
+        const qtyInp = document.createElement('input');
+        qtyInp.type = 'number'; qtyInp.className = 'sim-exit-qty';
+        qtyInp.min = String(qtyStep); qtyInp.step = String(qtyStep);
+        qtyInp.value = o.qty;
+
+        const pctEl = document.createElement('span');
+        pctEl.className = 'sim-exit-pct';
+        pctEl.textContent = pct + '%';
+
+        const del = document.createElement('button');
+        del.className = 'sim-exit-del'; del.type = 'button';
+        del.textContent = '🗑'; del.title = t_('sim.exitRemove');
+
+        priceInp.addEventListener('change', () => {
+          const v = parseFloat(priceInp.value);
+          if (!Number.isFinite(v)) { this.refresh(); return; }
+          this._stripBracketOco(parentId);
+          Controller.engine.modifyOrder(o.id,
+            o.type === 'limit' ? { price: v } : { stopPrice: v });
+          this._afterExitMutation();
+        });
+        qtyInp.addEventListener('change', () => {
+          const v = parseFloat(qtyInp.value);
+          if (!Number.isFinite(v) || v <= 0) { this.refresh(); return; }
+          this._stripBracketOco(parentId);
+          Controller.engine.modifyOrder(o.id, { qty: v });
+          this._afterExitMutation();
+        });
+        del.addEventListener('click', () => {
+          this._stripBracketOco(parentId);
+          Controller.engine.cancelOrder(o.id);
+          this._afterExitMutation();
+        });
+
+        row.append(tag, priceInp, qtyInp, pctEl, del);
+        rows.appendChild(row);
+      };
+
+      tps.forEach((o, i) => legRow(o, 'tp', i + 1));
+      sls.forEach((o, i) => legRow(o, 'sl', i + 1));
+
+      // Coverage: how much of the open position the TP legs close. A
+      // runner (sum < size) or over-fill (sum > size, engine clamps) is
+      // annotated. SL sizing is intentionally not summed here — one SL
+      // typically covers the whole remainder.
+      if (cov) {
+        const sumTp = tps.reduce((s, o) => s + (o.qty || 0), 0);
+        const pct = openQty > 0 ? Math.round((sumTp / openQty) * 100) : 0;
+        let text = t_('sim.exitCoverage', { pct });
+        cov.classList.remove('full', 'over');
+        const diff = +(sumTp - openQty).toFixed(4);
+        if (diff < -1e-9) {
+          text += ' ' + t_('sim.exitRunner', { qty: +(-diff).toFixed(4) });
+        } else if (diff > 1e-9) {
+          text += ' ' + t_('sim.exitOver', { qty: diff });
+          cov.classList.add('over');
+        } else if (sumTp > 0) {
+          cov.classList.add('full');
+        }
+        cov.textContent = text;
+      }
+    },
+
+    /** Append a reduce-only exit leg to the current position's bracket.
+     *  Seeds a sensible price beyond the farthest same-kind leg (or from
+     *  entry when none) and a qty covering the remaining position; the
+     *  user then edits the number or drags the chart line. */
+    _addExitLevel(kind) {
+      const eng = Controller.engine;
+      const pos = eng.getPositions()[0];
+      if (!pos) return;
+      const { parentId, tps, sls } = this._exitLegsOf(pos);
+      if (parentId == null) return;
+      const parent = eng.getOrder(parentId);
+      const branchId = (parent && parent.branchId) || 'main';
+      const tick = (Controller.spec && Controller.spec.tickSize) || 0.25;
+      const isLong = pos.side === 'long';
+      const entry = pos.avgEntryPrice;
+      const oppSide = isLong ? 'sell' : 'buy';
+      // Seed offset: step out by one "unit" of the existing structure — the
+      // distance from entry to the farthest same-kind leg (so TP2 lands a
+      // reward-step beyond TP1), falling back to the other side's distance
+      // or ~0.2% of price. A flat 20-tick offset was invisible on low-tick
+      // instruments (0.20 on gold). The user then fine-tunes by edit/drag.
+      const tpDist = tps.length ? Math.max(...tps.map(o => Math.abs(o.price - entry))) : 0;
+      const slDist = sls.length ? Math.max(...sls.map(o => Math.abs(o.stopPrice - entry))) : 0;
+      const unit = (kind === 'tp' ? (tpDist || slDist) : (slDist || tpDist))
+        || Math.abs(entry) * 0.002;
+      const step = Math.max(unit, 20 * tick);
+
+      let seedPrice, seedQty, type, priceKey;
+      if (kind === 'tp') {
+        type = 'limit'; priceKey = 'price';
+        const prices = tps.map(o => o.price).filter(Number.isFinite);
+        const base = prices.length
+          ? (isLong ? Math.max(...prices) : Math.min(...prices))
+          : entry;
+        seedPrice = isLong ? base + step : base - step;
+        const sumTp = tps.reduce((s, o) => s + (o.qty || 0), 0);
+        const remain = +(pos.qty - sumTp).toFixed(4);
+        seedQty = remain > 1e-9 ? remain : pos.qty;
+      } else {
+        type = 'stop'; priceKey = 'stopPrice';
+        const prices = sls.map(o => o.stopPrice).filter(Number.isFinite);
+        const base = prices.length
+          ? (isLong ? Math.min(...prices) : Math.max(...prices))
+          : entry;
+        seedPrice = isLong ? base - step : base + step;
+        seedQty = pos.qty;      // one SL usually covers the whole remainder
+      }
+
+      this._stripBracketOco(parentId);
+      try {
+        const id = eng.placeOrder({
+          side: oppSide, type, qty: seedQty,
+          [priceKey]: seedPrice,
+          bracketParentId: parentId, branchId,
+        });
+        const o = eng.getOrder(id);
+        if (o) o.active = true;       // parent already filled
+      } catch (e) {
+        console.warn('[sim] add exit level failed', e.message);
+        Panel.flashError && Panel.flashError(e.message);
+        return;
+      }
+      this._afterExitMutation();
     },
 
     /** Drive the DOM bracket tickets (TP / Entry / SL) + the vertical
@@ -1116,21 +1411,35 @@
         return `${sign}${abs} ${cur}`;
       };
 
-      // Resolve current TP/SL price (from proposal during active proposal,
-      // else from engine bracket children for the committed/armed case).
+      // Resolve current TP/SL price. Only while actively DRAFTING the first
+      // leg (pending/editing) do we read the scalar ps.tp/ps.sl. Once armed
+      // (or with no proposal) we read the engine's committed children — the
+      // NEAREST TP is the active one. This is what stops a filled TP1's
+      // ticket from lingering at its dead price with an error badge: after
+      // TP1 fills the nearest committed TP becomes TP2 and the ticket moves.
       const eng = Controller.engine;
+      const drafting = inProposal && (ps.phase === 'pending' || ps.phase === 'editing');
       let tpPrice = null, slPrice = null;
-      if (inProposal) {
-        if (Number.isFinite(ps.tp)) tpPrice = ps.tp;
+      // rrReward = qty-weighted average |tp - entry| across ALL committed TP
+      // legs (user: "RR 應以兩個 TP 做平均算"), not just the nearest one.
+      let rrReward = null;
+      if (drafting) {
+        if (Number.isFinite(ps.tp)) { tpPrice = ps.tp; rrReward = Math.abs(ps.tp - pos.avgEntryPrice); }
         if (Number.isFinite(ps.sl)) slPrice = ps.sl;
       } else if (pos.entryOrderIds && pos.entryOrderIds.length) {
         const parentId = pos.entryOrderIds[0];
-        const tpChild = eng.getPendingOrders().find(
-          o => o.bracketParentId === parentId && o.type === 'limit');
+        const tpChildren = eng.getPendingOrders()
+          .filter(o => o.bracketParentId === parentId && o.type === 'limit')
+          .sort((a, b) => Math.abs(a.price - pos.avgEntryPrice) - Math.abs(b.price - pos.avgEntryPrice));
         const slChild = eng.getPendingOrders().find(
           o => o.bracketParentId === parentId && o.type === 'stop');
-        if (tpChild) tpPrice = tpChild.price;
+        if (tpChildren.length) tpPrice = tpChildren[0].price;    // nearest = active
         if (slChild) slPrice = slChild.stopPrice;
+        if (tpChildren.length) {
+          let wr = 0, wq = 0;
+          for (const c of tpChildren) { wr += Math.abs(c.price - pos.avgEntryPrice) * c.qty; wq += c.qty; }
+          rrReward = wq > 0 ? wr / wq : null;
+        }
       }
 
       const validity = (inProposal && ps.validity) || {};
@@ -1159,8 +1468,18 @@
         if (warn) warn.hidden = !isInvalid;
       };
 
-      fillTicket(this._ticketTp, tpPrice, 'tp');
-      fillTicket(this._ticketSl, slPrice, 'sl');
+      // While DRAFTING the first leg, the hardcoded single tp/sl tickets
+      // show the ps draft. Once ARMED we render one dynamic ticket PER
+      // committed leg instead (see _syncLegTickets) — so TP2/TP3 each get
+      // the same ticket UI as TP1, not just a bare line.
+      if (drafting) {
+        fillTicket(this._ticketTp, tpPrice, 'tp');
+        fillTicket(this._ticketSl, slPrice, 'sl');
+      } else {
+        if (this._ticketTp) this._ticketTp.hidden = true;
+        if (this._ticketSl) this._ticketSl.hidden = true;
+      }
+      this._syncLegTickets(pos, drafting, yOf);
 
       // ----- Entry ticket (always visible while a position is open) -----
       const entryEl = this._ticketEntry;
@@ -1190,10 +1509,11 @@
           const rrSeg = entryEl.querySelector('.seg-rr');
           const rrEl  = entryEl.querySelector('.rr');
           if (rrSeg) {
-            const bothDropped = Number.isFinite(tpPrice)
+            const bothDropped = Number.isFinite(rrReward)
                               && Number.isFinite(slPrice);
             if (bothDropped) {
-              const reward = Math.abs(tpPrice - pos.avgEntryPrice);
+              // reward = qty-weighted avg distance across all TP legs.
+              const reward = rrReward;
               const risk   = Math.abs(pos.avgEntryPrice - slPrice);
               const rr = risk > 0 ? reward / risk : 0;
               if (rrEl) rrEl.textContent = rr > 0
@@ -1283,6 +1603,153 @@
         // → armed) demand the rail fully hide regardless of hover state.
         this._updateRailVisibility();
       }
+    },
+
+    /** Per-leg committed tickets (sim-multi-tp-feature). In the armed /
+     *  committed state each TP and SL child order gets its own DOM ticket
+     *  — the SAME pill UI as the drafting TP1 ticket (qty + USD + ✕) —
+     *  cloned from the hardcoded template and positioned at the leg's
+     *  price. Dimmed (lower opacity) for queued later TPs to match the
+     *  dashed line. ✕ cancels that specific leg; re-pricing is done by
+     *  dragging the on-chart line (the band is draggable). Tickets are
+     *  pooled by order id and cleaned up when a leg fills / is cancelled. */
+    _syncLegTickets(pos, drafting, yOf) {
+      const container = this._ticketsEl;
+      if (!container) return;
+      if (!this._legTickets) this._legTickets = new Map();  // orderId → el
+      const clearAll = () => {
+        for (const [, el] of this._legTickets) el.remove();
+        this._legTickets.clear();
+      };
+      // Only in the committed/armed phase do we split into per-leg tickets.
+      if (drafting || !pos || !pos.entryOrderIds || !pos.entryOrderIds.length) {
+        clearAll();
+        return;
+      }
+      const eng = Controller.engine;
+      const parentId = pos.entryOrderIds[0];
+      const spec = Controller.spec || {};
+      const pv = spec.pointValue || 1, lot = spec.lotSize || 1;
+      const cur = spec.currency || 'USD';
+      const dir = pos.side === 'long' ? 1 : -1;
+      const fmtUSD = (n) =>
+        `${n >= 0 ? '+ ' : '- '}${Math.abs(n).toFixed(2)} ${cur}`;
+
+      const tps = eng.getPendingOrders()
+        .filter(o => o.bracketParentId === parentId && o.type === 'limit')
+        .sort((a, b) => Math.abs(a.price - pos.avgEntryPrice) - Math.abs(b.price - pos.avgEntryPrice));
+      const sls = eng.getPendingOrders()
+        .filter(o => o.bracketParentId === parentId && o.type === 'stop')
+        .sort((a, b) => Math.abs(a.stopPrice - pos.avgEntryPrice) - Math.abs(b.stopPrice - pos.avgEntryPrice));
+      const legs = [];
+      tps.forEach((o, i) => legs.push({ o, kind: 'tp', price: o.price, dim: i > 0 }));
+      sls.forEach((o) => legs.push({ o, kind: 'sl', price: o.stopPrice, dim: false }));
+
+      const seen = new Set();
+      for (const leg of legs) {
+        seen.add(leg.o.id);
+        let el = this._legTickets.get(leg.o.id);
+        if (!el) {
+          el = this._makeLegTicket(leg.kind);
+          if (!el) continue;
+          container.appendChild(el);
+          this._legTickets.set(leg.o.id, el);
+        }
+        el._orderId = leg.o.id;
+        const y = yOf(leg.price);
+        if (y == null) { el.hidden = true; continue; }
+        el.hidden = false;
+        el.style.top = y + 'px';
+        el.classList.toggle('dim', !!leg.dim);
+        const usd = (leg.price - pos.avgEntryPrice) * dir * leg.o.qty * pv * lot;
+        const qtyEl = el.querySelector('.qty');
+        const plEl  = el.querySelector('.pl');
+        if (qtyEl) qtyEl.textContent = String(leg.o.qty);
+        if (plEl)  plEl.textContent  = fmtUSD(usd);
+      }
+      for (const [id, el] of this._legTickets) {
+        if (!seen.has(id)) { el.remove(); this._legTickets.delete(id); }
+      }
+    },
+
+    /** Clone the hardcoded tp/sl ticket as a dynamic per-leg ticket and
+     *  wire its ✕ to cancel that specific committed leg (reduce-only). */
+    _makeLegTicket(kind) {
+      const tpl = kind === 'tp' ? this._ticketTp : this._ticketSl;
+      if (!tpl) return null;
+      const el = tpl.cloneNode(true);
+      el.removeAttribute('id');
+      el.dataset.dynamic = '1';
+      el.classList.add('leg-ticket');
+      el.hidden = false;
+      const warn = el.querySelector('.sim-ticket-warn');
+      if (warn) warn.hidden = true;
+      const x = el.querySelector('.seg-x');
+      if (x) x.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = el._orderId;
+        if (id == null) return;
+        const eng = Controller.engine;
+        const o = eng.getOrder(id);
+        if (o && o.bracketParentId != null) this._stripBracketOco(o.bracketParentId);
+        eng.cancelOrder(id);
+        this._afterExitMutation();
+      });
+      this._wireLegTicketDrag(el);
+      return el;
+    },
+
+    /** Vertical drag on a committed per-leg ticket → re-price THAT leg's
+     *  engine order (strip OCO → reduce-only). Mirrors the on-chart band
+     *  drag so the pill is a drag handle just like the original TP1 ticket
+     *  — this is what makes TP2/TP3 draggable (their thin dashed line is a
+     *  poor grab target). */
+    _wireLegTicketDrag(ticketEl) {
+      if (!ticketEl) return;
+      let onMove = null, onUp = null;
+      ticketEl.addEventListener('mousedown', (e) => {
+        if (e.target.closest && e.target.closest('.seg-x')) return;
+        const orderId = ticketEl._orderId;
+        if (orderId == null) return;
+        const eng = Controller.engine;
+        const order = eng.getOrder(orderId);
+        if (!order) return;
+        e.preventDefault(); e.stopPropagation();
+        ticketEl.classList.add('dragging');
+        const chartArea = document.getElementById('chart-area');
+        const tickSize = (Controller.spec && Controller.spec.tickSize) || 0.25;
+        const parentId = order.bracketParentId;
+        const key = order.type === 'limit' ? 'price' : 'stopPrice';
+        onMove = (ev) => {
+          const chart = (window.App && window.App.chart) || null;
+          if (!chart || !chart.convertFromPixel || !chartArea) return;
+          const rect = chartArea.getBoundingClientRect();
+          const y = ev.clientY - rect.top;
+          try {
+            const pt = chart.convertFromPixel({ x: 0, y }, { paneId: 'candle_pane' });
+            const data = Array.isArray(pt) ? pt[0] : pt;
+            const price = data && data.value;
+            if (!Number.isFinite(price)) return;
+            const snapped = Math.round(price / tickSize) * tickSize;
+            if (parentId != null) this._stripBracketOco(parentId);
+            eng.modifyOrder(orderId, { [key]: snapped });
+            if (Controller._markDirty) Controller._markDirty();
+            this.refresh();
+            if (window.SimOverlays && window.SimOverlays.sync) window.SimOverlays.sync();
+          } catch (err) { /* convert error — ignore */ }
+        };
+        onUp = () => {
+          ticketEl.classList.remove('dragging');
+          if (Controller._tickNow) Controller._tickNow();   // fill if now in-range
+          this.refresh();
+          if (window.SimOverlays && window.SimOverlays.sync) window.SimOverlays.sync();
+          document.removeEventListener('mousemove', onMove, true);
+          document.removeEventListener('mouseup',   onUp,   true);
+          onMove = null; onUp = null;
+        };
+        document.addEventListener('mousemove', onMove, true);
+        document.addEventListener('mouseup',   onUp,   true);
+      });
     },
 
     /** ✕ glyph handler on TP/SL tickets — return that leg to `empty`
