@@ -134,6 +134,173 @@ input[type=range] { padding: 0; border: none; }
 }
 #chart { flex: 1 1 auto; width: 100%; min-height: 0; position: relative; }
 
+/* ========== Multi-timeframe panes (pane_manager.js) ==========
+   #pane-row wraps #chart (pane 0) so it can switch from a single flex
+   item (today's exact layout) into a CSS grid of N chart panes without
+   moving #chart out of #chart-area — the position:absolute overlays
+   below (tickets, rail, fork markers, mini-chart) stay children of
+   #chart-area and keep their existing px math untouched. */
+.pane-row { flex: 1 1 auto; width: 100%; min-height: 0; display: flex; gap: 6px; position: relative; }
+/* Draggable divider overlays (pane_manager.js _layoutResizeHandles) —
+   absolutely positioned against .pane-row, NOT grid participants, so
+   they never disturb the grid's own auto-placement of the panes. */
+.pane-resize-handle { position: absolute; z-index: 5; background: transparent; }
+.pane-resize-handle.col { cursor: col-resize; }
+.pane-resize-handle.row { cursor: row-resize; }
+.pane-resize-handle:hover, .pane-resize-handle.dragging { background: rgba(41, 98, 255, 0.35); }
+/* Block text selection for the whole page while a drag is in progress
+   (the resize cursor itself is set inline on <body> by _dragTrack, per
+   col vs row, since a CSS class can't parameterize which one). */
+body.pane-resizing, body.pane-resizing * { user-select: none; }
+.pane-row #chart { flex: 1 1 auto; }
+.pane-row[data-layout="cols3"] {
+  display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: 1fr;
+}
+.pane-row[data-layout="mainstack"] {
+  display: grid; grid-template-columns: 2.1fr 1fr; grid-template-rows: repeat(2, 1fr);
+}
+.pane-row[data-layout="mainstack"] > [data-pane="0"] { grid-row: 1 / span 2; }
+.pane-row[data-layout="quad"] {
+  display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr);
+}
+.pane-row[data-layout] #chart,
+.pane-row[data-layout] .pane-cell { min-width: 0; min-height: 0; }
+
+/* Extra panes (index >= 1) — own KLineChart instance + TF header.
+   Pane 0 (#chart) has no header; its TF stays controlled by the
+   existing topbar #tf-display button. */
+.pane-cell {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: #131722; border: 1px solid #2a2e39; border-radius: 4px; overflow: hidden;
+}
+/* While the TF popup is open targeting this pane (hover + type a
+   number, or click its current-TF button) — disambiguates which pane
+   is about to change when several are on screen. */
+.pane-cell.tf-targeting { border-color: #2962ff; box-shadow: 0 0 0 1px #2962ff inset; }
+.pane-cell-head {
+  flex: none; display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px; background: #1e222d; border-bottom: 1px solid #2a2e39;
+}
+/* Current-TF button — click opens the SAME digit-buffer popup (#tf-popup)
+   the main chart's own TF button uses, targeted at this pane. */
+.pane-tf-current {
+  padding: 3px 8px; border-radius: 4px; font-size: 11.5px; font-weight: 600;
+  color: #d1d4dc; background: #131722; border: 1px solid #363a45;
+}
+.pane-tf-current:hover { border-color: #4a5062; }
+.pane-tf-select { display: flex; gap: 2px; background: #131722; border: 1px solid #363a45; border-radius: 4px; padding: 2px; }
+.pane-tf-select button {
+  padding: 3px 7px; border-radius: 3px; font-size: 11.5px; font-weight: 600; color: #787b86;
+}
+.pane-tf-select button.active { background: #2962ff; color: #fff; }
+.pane-tf-select button:hover:not(.active) { background: rgba(255,255,255,0.05); color: #d1d4dc; }
+/* Manage button — opens the object-tree-style checklist popover below
+   to edit which frequencies show up as this pane's quick-pick pills. */
+.pane-tf-manage { color: #787b86; padding: 2px 5px; border-radius: 3px; font-size: 12px; }
+.pane-tf-manage:hover { background: #2a2e39; color: #d1d4dc; }
+.pane-cell-remove { margin-left: auto; color: #4d5260; padding: 2px 5px; border-radius: 3px; }
+.pane-cell-remove:hover { background: #2a2e39; color: #ef5350; }
+.pane-cell-body { flex: 1 1 auto; min-height: 0; position: relative; }
+.pane-cell-empty {
+  display: flex; align-items: center; justify-content: center;
+  color: #4d5260; font-size: 12px; border: 1px dashed #363a45; border-radius: 4px;
+  background: #1a1e29; cursor: pointer;
+}
+.pane-cell-empty:hover { color: #787b86; border-color: #2962ff; }
+
+/* Manage-saved-frequencies popover — object-tree-style checklist,
+   body-appended + fixed-positioned like .color-popover so it isn't
+   clipped by .pane-cell's overflow:hidden. */
+.pane-tf-manager-popover {
+  position: fixed; width: 160px;
+  background: #1e222d; border: 1px solid #363a45; border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+  padding: 6px 0; z-index: 10200;
+  max-height: 320px; overflow-y: auto;
+}
+.pane-tf-manager-title {
+  padding: 4px 14px 6px; font-size: 12px; font-weight: 600; color: #d1d4dc;
+  border-bottom: 1px solid #2a2e39; margin-bottom: 4px;
+}
+.pane-tf-manager-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 14px; font-size: 12.5px; color: #d1d4dc; cursor: pointer;
+}
+.pane-tf-manager-row:hover { background: #2a2e39; }
+.pane-tf-manager-row input[type="checkbox"] { margin: 0; accent-color: #2962ff; }
+
+/* Layout-picker toolbar row above the pane grid. */
+.pane-layout-bar {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; background: #1e222d; border-bottom: 1px solid #2a2e39;
+}
+.pane-layout-bar[hidden] { display: none; }
+.pane-layout-label { color: #787b86; font-size: 12px; }
+.pane-layout-opt {
+  display: flex; align-items: center; padding: 5px 8px;
+  background: #131722; border: 1px solid #363a45; border-radius: 4px; color: #787b86;
+}
+.pane-layout-opt svg { fill: #171b26; stroke: #4a5062; }
+.pane-layout-opt:hover { color: #d1d4dc; border-color: #4a5062; }
+.pane-layout-opt.active { color: #d1d4dc; border-color: #2962ff; background: rgba(41,98,255,0.14); }
+.pane-layout-spacer { flex: 1; }
+.pane-layout-add {
+  padding: 6px 10px; border: 1px dashed #363a45; border-radius: 4px; color: #787b86; font-size: 12px;
+}
+.pane-layout-add:hover { color: #d1d4dc; border-color: #2962ff; }
+.pane-layout-add[disabled] { opacity: 0.4; cursor: not-allowed; }
+.pane-layout-add[disabled]:hover { color: #787b86; border-color: #363a45; }
+.pane-layout-exit { padding: 5px 8px; border-radius: 4px; color: #787b86; }
+.pane-layout-exit:hover { background: #2a2e39; color: #ef5350; }
+
+/* While multi-pane mode is active, the legacy single-chart overlays
+   (px-math'd against #chart-area's FULL bounding rect: sim ticket
+   rail/pending-tickets/bracket-tickets, fork markers, tool quickbar,
+   snap indicator, the branch mini-chart, replay's pick-mode dim) would
+   render mis-positioned once #chart-area holds more than one pane —
+   they assume they alone occupy the whole area. Hide them for now;
+   making them pane-aware is a later phase. #sim-history-panel is a
+   vertical flex sibling (not px-positioned against the area's width)
+   so it's left alone and still works normally in multi-pane mode.
+   #sim-bracket-rail / #sim-pending-tickets / #sim-bracket-tickets are
+   NOT in this hide-list (see the --sim-pane-offset rules below
+   instead) — the order-entry ticket UI (drag out a new TP/SL, edit a
+   pending order) only exists on the main chart and has no per-pane
+   equivalent, so hiding it in multi-pane mode would make placing/
+   editing an order impossible while any pane is open, not just
+   mis-positioned. */
+#chart-area.multipane #mini-chart-panel,
+#chart-area.multipane #tool-quickbar,
+#chart-area.multipane #snap-indicator,
+#chart-area.multipane #branch-fork-markers,
+#chart-area.multipane #branch-fork-tooltip,
+#chart-area.multipane #branch-bar-select-preview,
+#chart-area.multipane .pick-dim {
+  display: none !important;
+}
+/* .sim-ticket / .sim-pending-ticket / .sim-rail-line / .sim-rail-dot
+   (further down this file) are px-positioned against #chart-area's
+   full width (a `right: Npx` from the area's right edge) — correct
+   only when #chart (pane 0) fills #chart-area alone. Their `right`
+   uses calc(... + var(--sim-pane-offset)) for exactly this reason;
+   pane_manager.js sets --sim-pane-offset on #chart-area to the width
+   of whatever sits to the right of pane 0 (0 in single-pane mode, so
+   the calc() is a no-op then — byte-identical to before multi-pane
+   mode existed). See pane_manager.js _updateSimTicketOffset.
+
+   Same problem on the Y axis: sim_panel.js writes each ticket's `top`
+   in JS from chart.convertToPixel — a value relative to #chart's OWN
+   canvas origin, which equals #chart-area's top only when there's no
+   #pane-layout-bar above the pane grid (i.e. multi-pane mode off).
+   With it visible, #chart sits `--sim-pane-top-offset` px lower than
+   #chart-area's top, so the container itself is shifted down by that
+   same amount — cheaper than touching every JS-computed `top` write
+   in sim_panel.js, and 0 in single-pane mode so nothing changes there. */
+#chart-area { --sim-pane-offset: 0px; --sim-pane-top-offset: 0px; }
+#sim-bracket-rail, #sim-pending-tickets, #sim-bracket-tickets {
+  transform: translateY(var(--sim-pane-top-offset, 0px));
+}
+
 /* ===== Indicator legend (top-left of chart) — indicator-manager-spec §1 =====
    IndicatorManager appends #indicator-legend as a child of #chart. Pointer-
    events default to none so the legend doesn't capture chart-pan drags;
@@ -2206,6 +2373,25 @@ input[type=range] { padding: 0; border: none; }
 }
 .settings-popover .row input[type="number"]:focus,
 .settings-popover .row select:focus { border-color: #2962ff; }
+.settings-popover .ps-row-checkbox label { flex: 1 1 auto; }
+.settings-popover .ps-row-checkbox input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  accent-color: #2962ff;
+  cursor: pointer;
+}
+.settings-popover .ps-row-color label { flex: 1 1 auto; }
+.settings-popover .ps-row-color input[type="color"] {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid #2a2e39;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
 .settings-popover .ps-actions {
   display: flex;
   align-items: center;
@@ -2544,7 +2730,7 @@ input[type=range] { padding: 0; border: none; }
 
 .sim-ticket {
   position: absolute;
-  right: 110px;
+  right: calc(110px + var(--sim-pane-offset, 0px));
   height: 24px;
   display: inline-flex;
   align-items: center;
@@ -2766,7 +2952,7 @@ input[type=range] { padding: 0; border: none; }
 
 .sim-pending-ticket {
   position: absolute;
-  right: 110px;
+  right: calc(110px + var(--sim-pane-offset, 0px));
   height: 24px;
   display: inline-flex;
   align-items: center;
@@ -2959,7 +3145,7 @@ input[type=range] { padding: 0; border: none; }
 .sim-rail-line {
   position: absolute;
   top: 0; bottom: 0;
-  right: 75px;
+  right: calc(75px + var(--sim-pane-offset, 0px));
   width: 1px;
   background: var(--sim-entry-color);
   opacity: 0;          /* default hidden — fades in via .sim-rail-visible */
@@ -2968,7 +3154,7 @@ input[type=range] { padding: 0; border: none; }
 
 .sim-rail-dot {
   position: absolute;
-  right: 75px;
+  right: calc(75px + var(--sim-pane-offset, 0px));
   width: 9px; height: 9px;
   border: 1px solid var(--sim-entry-color);
   background: var(--sim-bg-base);

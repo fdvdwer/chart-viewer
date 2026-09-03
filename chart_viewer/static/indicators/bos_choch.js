@@ -507,10 +507,19 @@
           enforce_choch_below_bos: (calcParams[5] !== undefined ? calcParams[5] : (ext.enforce_choch_below_bos !== undefined ? ext.enforce_choch_below_bos : DEFAULT_PARAMS.enforce_choch_below_bos)),
         };
         const events = detectEvents(dataList, params);
-        // Stash by indicator's paneId so getEventsForChart can look up.
-        // KLineChart passes indicator.paneId on most call paths; default safely.
-        const pkey = _paneKey(indicator && indicator.paneId);
-        _eventsByPaneKey.set(pkey, events);
+        // Stash by indicator's paneId so getEventsForChart can look up —
+        // UNLESS this instance is running on a multi-timeframe pane
+        // (pane_manager.js), not the main chart. calc() has no visibility
+        // into which chart instance called it (KLineChart doesn't pass one),
+        // and every instance defaults to the same paneId ('candle_pane'),
+        // so a pane's own recalc would silently clobber the main chart's
+        // cached events out from under event_log.js. __pane_instance is
+        // baked into extendData by pane_manager.js when mirroring
+        // indicators onto a pane; the main chart never sets it.
+        if (!ext.__pane_instance) {
+          const pkey = _paneKey(indicator && indicator.paneId);
+          _eventsByPaneKey.set(pkey, events);
+        }
         const out = new Array(dataList.length).fill(null);
         if (out.length > 0) out[0] = { events };
         return out;
@@ -583,6 +592,7 @@
       choch_color:             p.choch_color || DEFAULT_PARAMS.choch_color,
       label_color:             p.label_color || DEFAULT_PARAMS.label_color,
       marker_text_size:        Number(p.marker_text_size) || DEFAULT_PARAMS.marker_text_size,
+      __pane_instance:         !!p.__pane_instance,
     };
   }
 

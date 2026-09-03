@@ -46,6 +46,15 @@ const Replay = {
 
   intervalHandle: null,
   speed: 3,
+
+  // User's own PACING intent, in ms — set only when they manually pick a
+  // sub-tick from the dropdown (see the change handler). Auto-align
+  // (_autoPickSubTf) may force Replay.subTf FINER than this for a pane's
+  // sake; when it does, play() batches multiple ticks per interval so
+  // real-time playback speed still matches what the user actually chose
+  // instead of silently slowing down 1:1 with the finer precision — see
+  // _ticksPerStep(). null until the user picks one this session.
+  _paceTfMs: null,
 };
 const TICK_HISTORY_CAP = 1000;
 Replay.FOG_PX = 500;    // legacy — kept for safety, no longer used for replay fog
@@ -201,6 +210,49 @@ function parseTfMs(tf) {
 
 function tickIntervalMs() {
   return Math.max(20, Math.floor(1000 / Replay.speed));
+}
+
+/** The pacing (real-time-per-simulated-time) the user actually wants,
+ *  in ms — Replay._paceTfMs if they've manually picked a sub-tick this
+ *  session, else the OLD pre-pane-aware default (largest ALL_SUB_TFS
+ *  candidate <= the display bar's own TF — same rule syncSubTfOptions
+ *  used before it became pane-aware), so out-of-the-box pacing feels
+ *  identical to before panes existed. */
+function _referenceSubTfMs() {
+  if (Number.isFinite(Replay._paceTfMs) && Replay._paceTfMs > 0) return Replay._paceTfMs;
+  const dispMs = Replay.displayTfMs || Replay.subTfMs;
+  let best = null;
+  for (const tf of ALL_SUB_TFS) {
+    const ms = parseTfMs(tf);
+    if (ms > dispMs) break;
+    best = ms;
+  }
+  return best || Replay.subTfMs;
+}
+
+/** How many Replay.subTfMs-sized ticks to fire per play() interval so
+ *  real-time pacing matches _referenceSubTfMs() even when auto-align
+ *  forced Replay.subTf finer than that for a pane's sake — e.g. a 1min
+ *  pane forces subTf="1" while the reference pacing is "3": 3 one-
+ *  minute ticks fire per interval, each processed as its OWN precise
+ *  sub-bar (not a synthetic 3-minute aggregate), so fills still land on
+ *  the exact minute while playback doesn't visibly slow down. */
+function _ticksPerStep() {
+  if (!Number.isFinite(Replay.subTfMs) || Replay.subTfMs <= 0) return 1;
+  return Math.max(1, Math.round(_referenceSubTfMs() / Replay.subTfMs));
+}
+
+/** setInterval target for play() — replaces a bare `tick` reference so
+ *  multiple sub-ticks can fire per interval (see _ticksPerStep). Bails
+ *  out of the batch early if pause() fired mid-loop (ran out of
+ *  sub-bars, or the user hit pause / exited) rather than pushing
+ *  further ticks into a replay that's no longer playing. */
+function _tickBatch() {
+  const n = _ticksPerStep();
+  for (let i = 0; i < n; i++) {
+    if (!Replay.playing) break;
+    tick();
+  }
 }
 
 function tsToISO(ms) {
@@ -430,10 +482,14 @@ async function enterReplay(opts = {}) {
   Replay.tickHistory = [];
   Replay.displayTfMs = parseTfMs(App.currentTF);
 
-  // Sub-TF dropdown: default to the display TF (one bar at a time, no interpolation).
-  // User can pick a smaller TF for tick-style interpolation.
+  // Sub-TF dropdown: syncSubTfOptions already auto-selects the best TF
+  // for whatever multi-timeframe panes are open (see _autoPickSubTf) —
+  // a saved subTf from a PRIOR session only overrides that when no
+  // panes are open now (a saved preference is fine with nothing to get
+  // wrong; with panes open, correctness for what's on screen NOW wins
+  // over a stale saved value that predates them).
   syncSubTfOptions(App.currentTF);
-  if (restoreCursor && restoreCursor.subTf) {
+  if (restoreCursor && restoreCursor.subTf && !_finestPaneMs()) {
     const sel = document.getElementById('rep-subtf');
     if (sel && [...sel.options].some(o => o.value === restoreCursor.subTf)) {
       sel.value = restoreCursor.subTf;
@@ -467,17 +523,86 @@ function formatSubTfLabel(tf) {
   if (!m) return tf;
   return m[1] + (m[2] ? m[2].toUpperCase() : '');
 }
+
+/** Finest TF currently open across pane_manager.js's multi-timeframe
+ *  panes, in ms — or null when multi-pane is off / has no panes.
+ *  Main-chart-only replay never needs this (getLatestBar() already
+ *  matches main's own TF exactly); it's specifically for the "fill
+ *  timestamp only as precise as the sub-tick" limit documented on
+ *  sim_panel.js's onReplayTick / this file's own tick() call site. */
+function _finestPaneMs() {
+  const PM = window.PaneManager;
+  if (!PM || !PM.active || !Array.isArray(PM.panes) || !PM.panes.length) return null;
+  let min = Infinity;
+  for (const p of PM.panes) {
+    const ms = parseTfMs(p.tf);
+    if (Number.isFinite(ms) && ms > 0 && ms < min) min = ms;
+  }
+  return Number.isFinite(min) ? min : null;
+}
+
+/** Auto-pick the sub-tick TF string that gives every open pane full
+ *  fill-time precision, per the user's own rule: prefer the LARGEST
+ *  candidate that still evenly divides the finest open pane's TF (so
+ *  ticking doesn't run needlessly fine when a coarser granularity
+ *  already has full precision for every pane — e.g. panes at 5m/15m
+ *  only need a 5m sub-tick, not 1m); fall back to the finest available
+ *  candidate ('1', which divides every integer-minute TF) when nothing
+ *  divides evenly. Never coarser than `displayTf` itself (a sub-tick
+ *  finer than the display bar is meaningless — same cap
+ *  syncSubTfOptions already enforced). With no panes open, this
+ *  degrades to "prefer displayTf itself, else finest" — the previous
+ *  default behavior. */
+function _autoPickSubTf(displayTf) {
+  const dispMs = parseTfMs(displayTf);
+  const paneMs = _finestPaneMs();
+  const targetMs = paneMs != null ? Math.min(paneMs, dispMs) : dispMs;
+  let best = null;
+  for (const tf of ALL_SUB_TFS) {
+    const ms = parseTfMs(tf);
+    if (ms > dispMs) break;                          // never coarser than the display bar
+    if (ms <= targetMs && targetMs % ms === 0) best = tf;   // keep the LARGEST that still divides evenly
+  }
+  return best || '1';
+}
+
+/** Commit a sub-tick PRECISION change while replay is active:
+ *  Replay.subTf/subTfMs, pauses, re-fetches sub-bars. Deliberately does
+ *  NOT touch the dropdown's own displayed value (`sel.value`) — the
+ *  dropdown represents PACING (Replay._paceTfMs), a separate concept
+ *  from actual simulation precision, and the two are allowed to
+ *  diverge (e.g. dropdown shows "3" for pacing feel while Replay.subTf
+ *  stays "1" because a pane needs that precision). Only
+ *  syncSubTfOptions (rebuild time — entering replay / display-TF
+ *  change) sets the dropdown's shown value. Shared by the dropdown's
+ *  own change handler and autoAlignSubTf() below so both paths behave
+ *  identically. No-op if `tf` isn't a currently-valid option (e.g.
+ *  coarser than the display bar) or already the active value. */
+async function _applySubTf(tf) {
+  const sel = document.getElementById('rep-subtf');
+  if (!sel || !Replay.active) return;
+  if (![...sel.options].some(o => o.value === tf)) return;
+  if (tf === Replay.subTf) return;
+  Replay.subTf = tf;
+  Replay.subTfMs = parseTfMs(tf);
+  pause();
+  // Re-fetch sub-bars using new sub-TF but KEEP cursorTimestamp + inProgressBar
+  // (partial bar stays as-is, ticks will aggregate into it).
+  await refreshSubBars();
+}
+
 function syncSubTfOptions(displayTf) {
   const sel = document.getElementById('rep-subtf');
   if (!sel) return;
   const dispMs = parseTfMs(displayTf);
+  const autoPick = _autoPickSubTf(displayTf);
   sel.innerHTML = '';
   for (const tf of ALL_SUB_TFS) {
     if (parseTfMs(tf) > dispMs) continue;
     const opt = document.createElement('option');
     opt.value = tf;
     opt.textContent = formatSubTfLabel(tf);
-    if (tf === displayTf) opt.selected = true;
+    if (tf === autoPick) opt.selected = true;
     sel.appendChild(opt);
   }
 }
@@ -537,6 +662,14 @@ function _doExitReplay() {
   try { Replay.chart.setOffsetRightDistance(0); } catch (e) {}
   if (window.Drawing && window.Drawing.reanchorOverlaysWithDataIndex && App) {
     window.Drawing.reanchorOverlaysWithDataIndex(App.currentBars);
+  }
+  // Unlike every other cursor-mutating path in this file, exit doesn't
+  // route through updateStatus() (Replay.active is false, so its own
+  // early-return skips the DOM text update) — pane_manager.js's hook
+  // lives there, so it needs its own explicit call here to switch panes
+  // back from replay-synced to independent live data.
+  if (window.PaneManager && window.PaneManager.onReplayStatusUpdate) {
+    window.PaneManager.onReplayStatusUpdate();
   }
 }
 
@@ -931,6 +1064,14 @@ function tick() {
     }
   }
 
+  // Multi-timeframe panes (pane_manager.js): live-aggregate this same
+  // sub-tick into every pane whose own TF is coarse enough to make sense
+  // of it. Fire-and-forget — pane_manager.js is fully responsible for
+  // guarding against panes that aren't ready yet.
+  if (window.PaneManager && window.PaneManager.onReplaySubTick) {
+    window.PaneManager.onReplaySubTick(sub);
+  }
+
   const nextSub = Replay.subBars[Replay.cursorIdx];
   Replay.cursorTimestamp = nextSub ? nextSub.timestamp : (sub.timestamp + Replay.subTfMs);
   _bumpMaxCursorTs();
@@ -943,11 +1084,22 @@ function tick() {
   }
 
   // Sim engine tick: feed the (now-updated) in-progress bar to the order
-  // matcher so pending limits/stops fire intra-replay. Step 7 will swap
-  // this for proper sub-bar tick streaming; step 2 reuses the cursor's
-  // display-TF bar, which is good enough to verify the panel works.
+  // matcher so pending limits/stops fire intra-replay. Order matching
+  // itself still runs against the cursor's coarse DISPLAY-TF bar (step 2
+  // scope — the "step 7 sub-bar tick streaming" this comment used to
+  // flag as future work) — that's deliberate, not just unfinished: it's
+  // what makes a freshly-placed limit's one-full-bar defer window work
+  // (processBar's own "fresh top-level limit" comment) and every
+  // existing engine test assumes bar-granularity OHLC. What WAS missing
+  // is display precision: a fill's filledAtBarTs got pinned to that
+  // coarse bar's start regardless of which fine sub-tick actually
+  // crossed the trigger, so multi-timeframe pane arrows (which floor-
+  // lookup a bar by this timestamp) could land up to a full display-bar
+  // early. Passing this sub-tick's own timestamp lets onReplayTick
+  // sharpen just-filled orders' recorded time to it, without touching
+  // whether/which orders fill.
   if (window.SimController && window.SimController.onReplayTick) {
-    window.SimController.onReplayTick();
+    window.SimController.onReplayTick(sub.timestamp);
   }
 
   // Event log: poll structural-event indicators for new entries. Same
@@ -1455,7 +1607,7 @@ async function play() {
   if (!Replay.active) return;                 // user may have exited while we awaited
   Replay.playing = true;
   _setChartInteractionLocked(true);
-  Replay.intervalHandle = setInterval(tick, tickIntervalMs());
+  Replay.intervalHandle = setInterval(_tickBatch, tickIntervalMs());
   updatePlayIcon();
 }
 
@@ -1501,6 +1653,15 @@ function updateStatus() {
     el.textContent = lang === 'en'
       ? `Ready  ·  ${remaining} ${Replay.subTf} pending`
       : `準備就緒  ·  ${remaining} ${Replay.subTf} 待播`;
+  }
+  // updateStatus() is called from every cursor-mutating path in this file
+  // (tick, stepBack, TF-switch mid-replay, cursor re-pick, enter/exit) —
+  // the one safe, uniform hook for pane_manager.js's multi-TF panes to
+  // resync with the replay cursor, rather than trying to intercept each
+  // mutation path individually. Fire-and-forget: PaneManager's own async
+  // fetches are internally re-entrancy-guarded per pane.
+  if (window.PaneManager && window.PaneManager.onReplayStatusUpdate) {
+    window.PaneManager.onReplayStatusUpdate();
   }
 }
 
@@ -2169,12 +2330,24 @@ function init(chart) {
 
   document.getElementById('rep-subtf').addEventListener('change', async (e) => {
     if (!Replay.active) return;
-    Replay.subTf = e.target.value;
-    Replay.subTfMs = parseTfMs(Replay.subTf);
-    pause();
-    // Re-fetch sub-bars using new sub-TF but KEEP cursorTimestamp + inProgressBar
-    // (partial bar stays as-is, ticks will aggregate into it).
-    await refreshSubBars();
+    // The dropdown now controls PACING only — Replay._paceTfMs — never
+    // the actual simulation precision (Replay.subTf) directly. It used
+    // to: picking "3" here used to set Replay.subTf = "3" outright,
+    // silently dropping fill-time precision back to 3-minute boundaries
+    // even with a 1-minute pane open (the "should be 06:17, still shows
+    // 06:15" bug — autoAlignSubTf only re-corrects on a PANE mutation,
+    // which a manual dropdown pick doesn't trigger). Recomputing subTf
+    // via _autoPickSubTf right after keeps precision pane-optimal
+    // regardless of what pace the user just picked; _applySubTf's own
+    // no-op guard means this only actually touches Replay.subTf when
+    // the recomputed value is genuinely different, so it can't stomp on
+    // itself. The dropdown's own displayed value stays whatever the
+    // user just picked (native <select> behavior) even when it now
+    // differs from Replay.subTf — that's intentional: it reflects pace,
+    // not precision.
+    Replay._paceTfMs = parseTfMs(e.target.value);
+    const displayTf = (window.App && window.App.currentTF) || Replay.subTf;
+    await _applySubTf(_autoPickSubTf(displayTf));
   });
 
   // Click to pick
@@ -2260,6 +2433,17 @@ Replay.parseTfMs = parseTfMs;
 Replay.onTFChanged = onTFChanged;
 Replay.tick = tick;
 Replay.stepBack = stepBack;
+// Called by pane_manager.js after any pane mutation (add / remove /
+// TF change / multi-pane turned on) while replay is active, so the
+// sub-tick granularity stays correct for whatever panes are open NOW
+// — see _autoPickSubTf's doc comment for the actual rule. No-op when
+// replay isn't active (pane changes outside replay don't need this;
+// the next enterReplay() picks up the current panes via
+// syncSubTfOptions anyway) or the pick doesn't change anything.
+Replay.autoAlignSubTf = async function () {
+  if (!Replay.active || !window.App) return;
+  await _applySubTf(_autoPickSubTf(window.App.currentTF));
+};
 // Exposed so app.js can orchestrate symbol switches cleanly:
 Replay.saveReplayState = saveReplayState;
 Replay.loadReplayState = loadReplayState;
@@ -2280,7 +2464,9 @@ Replay.enterReplayRestore = async function (saved) {
   Replay.tickHistory = [];
   Replay.displayTfMs = parseTfMs(App.currentTF);
   syncSubTfOptions(App.currentTF);
-  if (saved && saved.subTf) {
+  // See enterReplay's own comment: a saved subTf only overrides the
+  // auto-pick when no multi-timeframe panes are open right now.
+  if (saved && saved.subTf && !_finestPaneMs()) {
     const sel = document.getElementById('rep-subtf');
     if (sel && [...sel.options].some(o => o.value === saved.subTf)) sel.value = saved.subTf;
   }

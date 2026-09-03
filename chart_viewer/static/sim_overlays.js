@@ -74,6 +74,43 @@
   // i.e. the price at which the runner giving back exactly the banked
   // gains nets the whole trade to zero. Keyed by positionId.
   const _beLineIdBy = new Map();
+  // Entry↔exit connector line (MultiCharts-style, opt-in via
+  // SimPanel.showTradeLink()): a flat dashed segment at the entry price,
+  // spanning from the entry bar to the exit bar (closed) or to that
+  // chart's own latest bar (still open). Fixed by SIDE, not P/L — green
+  // for long, red for short. Drawn for BOTH open and closed positions
+  // (position history), unlike sim_entry_line which is open-only and
+  // full-width. Keyed by positionId; main-chart only maps to _tradeLinkIdBy,
+  // per-pane maps live alongside the pane's other overlay-id maps.
+  const _tradeLinkIdBy = new Map();
+
+  // Multi-timeframe panes (pane_manager.js): unlike the single fixed
+  // mini chart, panes are dynamic (added/removed/TF-switched at
+  // runtime) — one full set of overlay-id maps per pane, created lazily
+  // via _getPaneMaps() and dropped via dropPaneMaps() when a pane is
+  // disposed. Panes get the FULL draggable set (readOnly:false) since
+  // it's the same underlying position everywhere, not a branch mirror —
+  // see _syncBrackets's opts.readOnly.
+  const _paneOverlayMaps = new Map(); // paneId → {bandIdBy, entryLineIdBy, beLineIdBy, arrowIdBy, durationIdBy}
+  function _getPaneMaps(paneId) {
+    let m = _paneOverlayMaps.get(paneId);
+    if (!m) {
+      m = {
+        bandIdBy: new Map(), entryLineIdBy: new Map(), beLineIdBy: new Map(),
+        arrowIdBy: new Map(), durationIdBy: new Map(), tradeLinkIdBy: new Map(),
+      };
+      _paneOverlayMaps.set(paneId, m);
+    }
+    return m;
+  }
+  /** Drop one pane's overlay-id maps without touching its chart — call
+   *  AFTER the pane's chart instance is already disposed (pane_manager.js
+   *  _disposePane/_disposeAllCharts), since chart.removeOverlay on an
+   *  already-torn-down instance would just throw into the try/catch for
+   *  nothing. Safe to call for a paneId with no maps (no-op). */
+  function dropPaneMaps(paneId) {
+    _paneOverlayMaps.delete(paneId);
+  }
 
   let _registered = false;
 
@@ -224,13 +261,32 @@
       createPointFigures: ({ coordinates, overlay, bounding }) => {
         if (!coordinates || coordinates.length < 1 || !bounding) return [];
         const y = coordinates[0].y;
-        const side = (overlay && overlay.extendData && overlay.extendData.side) || 'long';
+        const ext = (overlay && overlay.extendData) || {};
+        const side = ext.side || 'long';
         const color = side === 'short' ? '#ef5350' : '#2962ff';
-        return [{
+        const figs = [{
           type: 'line',
           attrs: { coordinates: [{ x: 0, y }, { x: bounding.width, y }] },
           styles: { color, size: 1, style: 'dashed', dashedValue: [2, 4] },
         }];
+        // showLabels-gated R/R chip (multi-timeframe panes only — see
+        // _syncBrackets's opts.showLabels doc comment). Sits at the left
+        // edge like sim_be_line's own label, one row above so the two
+        // don't overlap when both are present.
+        if (ext.rrLabel) {
+          figs.push({
+            type: 'text',
+            attrs: { x: 6, y: y - 14, text: ext.rrLabel, align: 'left', baseline: 'bottom' },
+            styles: {
+              color: '#ffffff', size: 10,
+              family: 'system-ui,-apple-system,sans-serif',
+              backgroundColor: `rgba(${side === 'short' ? '239,83,80' : '41,98,255'}, 0.85)`,
+              borderColor: 'transparent', borderSize: 0,
+              paddingLeft: 4, paddingRight: 4, paddingTop: 1, paddingBottom: 1,
+            },
+          });
+        }
+        return figs;
       },
     });
 
@@ -271,6 +327,63 @@
               borderColor: 'transparent', borderSize: 0,
               paddingLeft: 4, paddingRight: 4, paddingTop: 1, paddingBottom: 1,
             },
+          });
+        }
+        return figs;
+      },
+    });
+
+    // ----- Entry↔exit connector line (opt-in, MultiCharts-style) -----
+    //
+    // Two-point overlay: {entryTs, entryPrice} → {endTs, exitPrice} — a
+    // DIAGONAL dashed line, the actual price path from entry to exit (NOT
+    // flat at the entry price — corrected per the user's MultiCharts
+    // reference: the line has real slope, and each endpoint gets its own
+    // small side-pointing "flag" triangle marking exactly where it meets
+    // that price, tip touching the point). endTs/exitPrice is the exit
+    // bar+price for a closed position, or that chart's own latest bar +
+    // current close while still open (keeps sloping live). Both bar
+    // timestamps are pre-resolved by _syncTradeLinks via the same
+    // _findBarByTimestamp call the trade arrows use, so the line's ends
+    // land on the exact bar the corresponding arrow sits on. Color is
+    // ext.color, a hex string _syncTradeLinks resolves from
+    // SimPanel.tradeLinkColor() (user-adjustable win/loss colors —
+    // position-tool-settings pickers).
+    klinecharts.registerOverlay({
+      name: 'sim_trade_link',
+      totalStep: 2,
+      lock: true,
+      needDefaultPointFigure: false,
+      needDefaultXAxisFigure: false,
+      needDefaultYAxisFigure: false,
+      createPointFigures: ({ coordinates, overlay }) => {
+        if (!coordinates || coordinates.length < 2) return [];
+        const ext = (overlay && overlay.extendData) || {};
+        const color = ext.color || '#26a69a';
+        const figs = [{
+          type: 'line',
+          attrs: { coordinates: [coordinates[0], coordinates[1]] },
+          styles: { color, size: 1, style: 'dashed', dashedValue: [2, 3] },
+        }];
+        // Side-pointing "flag" triangle at each endpoint — tip touches
+        // the exact (bar, price) point, body trails back toward the
+        // other end so it reads as an arrowhead the dashed line runs
+        // into. Fixed small size regardless of zoom (matches how the
+        // trade-arrow triangles are drawn — see sim_trade_arrow above).
+        const TRI_LEN = 6, TRI_HALF_H = 5;
+        for (let i = 0; i < 2; i++) {
+          const tip = coordinates[i];
+          const other = coordinates[1 - i];
+          const dir = other.x >= tip.x ? 1 : -1;   // trail toward the other point
+          const baseX = tip.x + dir * TRI_LEN;
+          figs.push({
+            type: 'polygon',
+            attrs: { coordinates: [
+              { x: tip.x, y: tip.y },
+              { x: baseX, y: tip.y - TRI_HALF_H },
+              { x: baseX, y: tip.y + TRI_HALF_H },
+            ] },
+            styles: { style: 'fill', color },
           });
         }
         return figs;
@@ -441,6 +554,26 @@
         styles: { color: strokeColor, size: 1, style: 'dashed', dashedValue: [2, 4] },
       });
     }
+    // showLabels-gated USD P/L chip (multi-timeframe panes only — see
+    // _syncBrackets's opts.showLabels doc comment; main/mini already
+    // show this via the DOM ticket rail / don't need it). Anchored just
+    // left of the draggable handle (coordinates[0].x, near the pane's
+    // right edge) so it sits next to whatever the user is about to grab
+    // instead of overlapping the R/R chip pinned at the left edge.
+    if (ext.showLabel && ext.usdLabel) {
+      const anchorX = coordinates[0].x;
+      figures.push({
+        type: 'text',
+        attrs: { x: Math.max(4, anchorX - 10), y: exitY - 2, text: ext.usdLabel, align: 'right', baseline: 'bottom' },
+        styles: {
+          color: '#ffffff', size: 10,
+          family: 'system-ui,-apple-system,sans-serif',
+          backgroundColor: `rgba(${rgb}, 0.85)`,
+          borderColor: 'transparent', borderSize: 0,
+          paddingLeft: 4, paddingRight: 4, paddingTop: 1, paddingBottom: 1,
+        },
+      });
+    }
     return figures;
   }
 
@@ -490,35 +623,66 @@
   /** Resolve a bar by its timestamp from the engine-relevant source.
    *  In replay mode prefer Replay.displayBars; otherwise App.currentBars.
    *
+   *  Uses a FLOOR lookup (last bar with timestamp <= ts), not exact
+   *  equality: a fill's timestamp is stamped at whatever TF was active
+   *  at fill time (e.g. a 1-min boundary like 10:07:00). If the chart is
+   *  later switched to a coarser TF (e.g. 15-min bars at 10:00/10:15/...),
+   *  no bar shares that exact timestamp — exact-match lookup would return
+   *  null and the marker would silently vanish from `sync()`'s `want` map.
+   *  Floor lookup instead finds the coarser bar that CONTAINS the fill
+   *  timestamp, mirroring the binary search in replay.js's
+   *  findDisplayBarStart().
+   *
    *  We accept placeholder bars too: if the user filled a market order
    *  on the very first cursor pick (before any tick), the bar at the
    *  fill timestamp is a placeholder with all OHLC = placeholderFillPrice.
    *  Returning it lets the arrow draw at that price level immediately;
    *  on the next tick the bar materialises into a real K-bar and
-   *  _syncTradeArrows re-positions the arrow under the new wick. */
-  function _findBarByTimestamp(ts) {
+   *  _syncTradeArrows re-positions the arrow under the new wick.
+   *
+   *  `barsOverride`, when given, is searched INSTEAD of the main chart's
+   *  own bars. A multi-timeframe pane (pane_manager.js) needs this: its
+   *  own bar series can be a much finer TF than main's, and the fill's
+   *  exact low/high only exists on the bar that actually contains it.
+   *  Resolving every pane's arrow against main's (coarser) bars would
+   *  floor-lookup to main's bar covering the fill, then plant the arrow
+   *  at THAT bar's aggregate low/high — visually close on a slightly
+   *  finer pane, but badly off on a much finer one (e.g. main=15m,
+   *  pane=1m: the 15-minute low/high can sit many 1-minute bars away
+   *  from where the fill itself happened), and the X position also
+   *  snaps to main's coarser bar boundary instead of the pane's own bar
+   *  — exactly the "1 分鐘顆粒對不上，5/15 分鐘還好" symptom reported. */
+  function _findBarByTimestamp(ts, barsOverride) {
     if (!Number.isFinite(ts)) return null;
-    const R = window.Replay;
-    let bars = (window.App && window.App.currentBars) || [];
-    if (R && R.active && R.displayBars && R.displayBars.length) {
-      bars = R.displayBars;
-    }
-    for (let i = bars.length - 1; i >= 0; i--) {
-      const b = bars[i];
-      if (b && b.timestamp === ts) {
-        // Same normalisation as Controller.getLatestBar: placeholders
-        // carry stretched high/low purely for Y-axis stability. Trade-
-        // arrow positioning anchors at bar.low (long entry) / bar.high
-        // (short entry); without this collapse, a fill-on-placeholder
-        // arrow would render at recentLow/recentHigh — way off the
-        // actual entry price level.
-        if (b._placeholder) {
-          return { ...b, high: b.close, low: b.close };
-        }
-        return b;
+    let bars;
+    if (Array.isArray(barsOverride)) {
+      bars = barsOverride;
+    } else {
+      const R = window.Replay;
+      bars = (window.App && window.App.currentBars) || [];
+      if (R && R.active && R.displayBars && R.displayBars.length) {
+        bars = R.displayBars;
       }
     }
-    return null;
+    if (!bars.length) return null;
+    let lo = 0, hi = bars.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (bars[mid].timestamp > ts) hi = mid - 1;
+      else lo = mid + 1;
+    }
+    if (hi < 0) return null;
+    const b = bars[hi];
+    // Same normalisation as Controller.getLatestBar: placeholders
+    // carry stretched high/low purely for Y-axis stability. Trade-
+    // arrow positioning anchors at bar.low (long entry) / bar.high
+    // (short entry); without this collapse, a fill-on-placeholder
+    // arrow would render at recentLow/recentHigh — way off the
+    // actual entry price level.
+    if (b._placeholder) {
+      return { ...b, high: b.close, low: b.close };
+    }
+    return b;
   }
 
   function _latestBar() {
@@ -554,6 +718,7 @@
       _syncTradeArrows(main, eng);
       _syncPositionDuration(main, eng);
       _syncBrackets(main, eng);
+      _syncTradeLinks(main, eng);
     }
 
     // Mini chart — read-only subset (trade arrows + position-duration
@@ -589,6 +754,40 @@
       // them cleanly. KLineChart removeOverlay on a chart that no
       // longer has the overlay is a no-op.
       _wipeMiniOverlays();
+    }
+
+    // Multi-timeframe panes (pane_manager.js) — same position, full
+    // draggable set on EVERY active pane (not a branch mirror like mini,
+    // so no branchId filter — defaults to BranchEngine.activeBranchId,
+    // same as main). Each pane's overlays are anchored to THAT pane's
+    // own latest bar, not main's — panes run their own (possibly
+    // different-TF, possibly replay-lagged per Phase 3's design) bar
+    // series, and anchoring to a timestamp outside a pane's own data
+    // range would misplace or fail to attach the draggable handle.
+    const PM = window.PaneManager;
+    if (PM && Array.isArray(PM.panes)) {
+      for (const pane of PM.panes) {
+        if (!pane.chart) continue;
+        const dataList = pane.chart.getDataList ? pane.chart.getDataList() : [];
+        let paneLatest = null;
+        for (let i = dataList.length - 1; i >= 0; i--) {
+          if (!dataList[i]._placeholder) { paneLatest = dataList[i]; break; }
+        }
+        if (!paneLatest) continue; // pane has no real data yet — next sync() retries
+        const maps = _getPaneMaps(pane.id);
+        // bars: this pane's OWN series, so a fill's arrow anchors to the
+        // exact bar (and its real low/high) that pane displays at ITS OWN
+        // TF — not main's, which would misplace fine-TF panes. See
+        // _findBarByTimestamp's doc comment.
+        _syncTradeArrows(pane.chart, eng, { idBy: maps.arrowIdBy, bars: dataList });
+        _syncPositionDuration(pane.chart, eng, { idBy: maps.durationIdBy, anchorBar: paneLatest });
+        _syncBrackets(pane.chart, eng, {
+          idBy: maps.bandIdBy, entryIdBy: maps.entryLineIdBy, beIdBy: maps.beLineIdBy,
+          anchorTs: paneLatest.timestamp,
+          showLabels: true,
+        });
+        _syncTradeLinks(pane.chart, eng, { idBy: maps.tradeLinkIdBy, anchorBar: paneLatest, bars: dataList });
+      }
     }
   }
 
@@ -736,12 +935,21 @@
         // Replay cursor: skip arrows whose event is past the cursor.
         const inFuture = (cursorTs != null) && (entryOrder.filledAtBarTs > cursorTs);
         if (!inFuture) {
-          const bar = _findBarByTimestamp(entryOrder.filledAtBarTs);
+          const bar = _findBarByTimestamp(entryOrder.filledAtBarTs, opts && opts.bars);
           if (bar) {
             const isUp = pos.side === 'long';   // long entry → up arrow at bar.low
+            // Anchor at the resolved bar's OWN wick extreme (chart_viewer's
+            // original convention — user call: the triangle marks "this
+            // bar, at its edge", not the literal transacted price, which
+            // can land mid-candle-body and read as ambiguous). What
+            // actually matters for correctness is picking the right BAR —
+            // _findBarByTimestamp + filledAtBarTs precision (see
+            // sim_engine's _fillOrder / replay.js's onReplayTick call site)
+            // — not which value inside that bar the triangle sits at.
+            const value = isUp ? bar.low : bar.high;
             want.set(`${pos.id}.entry`, {
               ts: bar.timestamp,
-              value: isUp ? bar.low : bar.high,
+              value,
               isUp,
               posId: pos.id,
               event: 'entry',
@@ -765,13 +973,15 @@
           const exitInFork = evTs <= cutoff;
           const exitInPast = (cursorTs == null) || (evTs <= cursorTs);
           if (!exitInFork || !exitInPast) continue;
-          const bar = _findBarByTimestamp(evTs);
+          const bar = _findBarByTimestamp(evTs, opts && opts.bars);
           if (!bar) continue;
           // Long exit → red ↓ above high; short exit → blue ↑ below low.
           const isUp = pos.side === 'short';
+          // Bar's own wick extreme — see the entry arrow's comment above.
+          const value = isUp ? bar.low : bar.high;
           want.set(`${pos.id}.exit.${exId}`, {
             ts: bar.timestamp,
-            value: isUp ? bar.low : bar.high,
+            value,
             isUp,
             posId: pos.id,
             event: 'exit',
@@ -871,7 +1081,13 @@
       if (cutoff == null) return false;
       return !(Number.isFinite(p.openedAtBarTs) && p.openedAtBarTs > cutoff);
     });
-    const latest = _latestBar();
+    // Defaults to the MAIN chart's latest bar; opts.anchorBar overrides
+    // for a multi-timeframe pane — same reasoning as _syncBrackets's
+    // opts.anchorTs, PLUS the anchor bar's `close` is actually used as
+    // the line's "current price" endpoint value (not just an X
+    // position), so a pane should show ITS OWN current price here, not
+    // main's, to stay consistent with what that pane's candles show.
+    const latest = (opts && opts.anchorBar) || _latestBar();
 
     // Remove duration lines for closed / out-of-branch positions.
     const visibleIds = new Set(positions.map(p => p.id));
@@ -908,6 +1124,117 @@
     }
   }
 
+  /** Entry↔exit connector line (opt-in — SimPanel.showTradeLink()).
+   *  Draws, for EVERY position (open + history, unlike _syncPositionDuration
+   *  which is open-only), a dashed line from (entry bar, entry price) to
+   *  (exit bar, exit price) — real slope, not flat — or to opts.anchorBar /
+   *  this chart's own latest bar + close while still open (keeps sloping
+   *  live). opts mirrors the
+   *  other _sync* functions: idBy (per-chart overlay-id map), branchId
+   *  (mini-style filter, unused by the main/pane call sites today),
+   *  anchorBar (pane's own latest bar, so a still-open position's line
+   *  extends to what THAT pane currently shows, not main's), bars (that
+   *  chart's own bar list — see the _findBarByTimestamp calls below). */
+  function _syncTradeLinks(chart, eng, opts) {
+    const Panel = window.SimPanel;
+    const idBy = (opts && opts.idBy) || _tradeLinkIdBy;
+    if (!Panel || !Panel.showTradeLink || !Panel.showTradeLink()) {
+      // Feature off (or panel not ready yet) — sweep any leftover
+      // overlays (e.g. user just unchecked it) and bail.
+      for (const [, id] of idBy.entries()) {
+        try { chart.removeOverlay(id); } catch (e) { /* ignore */ }
+      }
+      idBy.clear();
+      return;
+    }
+    const filterBranchId = (opts && opts.branchId) || null;
+    const latest = (opts && opts.anchorBar) || _latestBar();
+    const winColor  = Panel.tradeLinkColor ? Panel.tradeLinkColor('win')  : '#26a69a';
+    const lossColor = Panel.tradeLinkColor ? Panel.tradeLinkColor('loss') : '#ef5350';
+
+    const want = new Map();   // positionId → { entryTs, endTs, value, color }
+    const allPositions = eng.getPositions().concat(eng.getPositionHistory());
+    for (const pos of allPositions) {
+      if (filterBranchId && pos.branchId !== filterBranchId) continue;
+      const entryOrder = pos.entryOrderIds && pos.entryOrderIds.length
+        ? eng.getOrder(pos.entryOrderIds[0]) : null;
+      if (!entryOrder || !Number.isFinite(entryOrder.filledAtBarTs)) continue;
+      // Resolve to the SAME bar the entry/exit ARROW lands on for THIS
+      // chart (_findBarByTimestamp + opts.bars, exactly like
+      // _syncTradeArrows) — using the raw order timestamp directly (like
+      // sim_entry_line does) let KLineChart pick its own nearest-match,
+      // which on a pane can differ by a bar from what the arrow actually
+      // sits on, leaving a visible gap between the line's end and the
+      // triangle it's supposed to reach.
+      const entryBar = _findBarByTimestamp(entryOrder.filledAtBarTs, opts && opts.bars);
+      if (!entryBar) continue;
+
+      const stillOpen = !Number.isFinite(pos.closedAtBarTs);
+      let endTs, endValue;
+      if (stillOpen) {
+        // Already a real bar on THIS chart — no _findBarByTimestamp
+        // needed. Slopes toward THAT pane's own current close, not
+        // main's, matching _syncPositionDuration's same reasoning.
+        endTs = latest ? latest.timestamp : null;
+        endValue = latest ? latest.close : null;
+      } else {
+        const exitBar = _findBarByTimestamp(pos.closedAtBarTs, opts && opts.bars);
+        endTs = exitBar ? exitBar.timestamp : null;
+        // Qty-weighted average across every exit leg (TP1/TP2/SL
+        // scale-outs) — same convention sim_history.js's _exitLegsInfo
+        // uses for its own weighted exit price.
+        let wp = 0, wq = 0;
+        for (const exId of (pos.exitOrderIds || [])) {
+          const eo = eng.getOrder(exId);
+          if (eo && Number.isFinite(eo.fillPrice) && Number.isFinite(eo.qty)) {
+            wp += eo.fillPrice * eo.qty; wq += eo.qty;
+          }
+        }
+        endValue = wq > 0 ? wp / wq : pos.avgEntryPrice;
+      }
+      if (!Number.isFinite(endTs) || !Number.isFinite(endValue) || endTs < entryBar.timestamp) continue;
+
+      // Win/loss color (user call, overriding the earlier by-side
+      // scheme): net of commission for a closed trade (matches
+      // sim_history's own netPL convention), live unrealised P/L while
+      // still open so the color can flip as price moves.
+      const netPnL = stillOpen
+        ? (pos.unrealisedPnL || 0)
+        : ((pos.realisedPnL || 0) - (pos.commissionPaid || 0));
+      want.set(pos.id, {
+        entryTs: entryBar.timestamp,
+        entryValue: pos.avgEntryPrice,
+        endTs,
+        endValue,
+        color: netPnL < 0 ? lossColor : winColor,
+      });
+    }
+
+    for (const [posId, chartId] of idBy.entries()) {
+      if (!want.has(posId)) {
+        try { chart.removeOverlay(chartId); } catch (e) { /* ignore */ }
+        idBy.delete(posId);
+      }
+    }
+    for (const [posId, info] of want.entries()) {
+      const points = [
+        { timestamp: info.entryTs, value: info.entryValue },
+        { timestamp: info.endTs, value: info.endValue },
+      ];
+      const ext = { color: info.color };
+      const existing = idBy.get(posId);
+      if (existing) {
+        try { chart.overrideOverlay({ id: existing, points, extendData: ext }); }
+        catch (e) { /* ignore */ }
+      } else {
+        try {
+          const newId = chart.createOverlay({ name: 'sim_trade_link', points, extendData: ext });
+          if (newId) idBy.set(posId, newId);
+        } catch (e) { /* ignore */ }
+      }
+    }
+  }
+
   function _syncBrackets(chart, eng, opts) {
     // opts (mini-chart parallel — same pattern as _syncTradeArrows /
     // _syncPositionDuration): { idBy, entryIdBy, branchId, readOnly }.
@@ -923,6 +1250,17 @@
     const entryIdBy      = (opts && opts.entryIdBy) || _entryLineIdBy;
     const filterBranchId = (opts && opts.branchId)  || null;
     const readOnly       = !!(opts && opts.readOnly);
+    // Multi-timeframe panes have no DOM ticket rail of their own (that
+    // UI is main-chart-only, see pane_manager.js's own doc comment) —
+    // the USD P/L per leg and the entry's R/R ratio are otherwise only
+    // visible on the main chart's tickets. opts.showLabels (set only by
+    // the pane sync path in sync()) turns on small canvas text chips for
+    // both so a pane reader doesn't have to glance back at the main
+    // chart / side panel to read them. Main + mini stay exactly as
+    // before (DOM ticket already shows this on main; mini wasn't asked
+    // for and doubling main's ticket with a canvas label would just be
+    // visual clutter sitting under it).
+    const showLabels     = !!(opts && opts.showLabels);
     // Committed legs on the main (editable) chart use the draggable
     // template variant; the read-only mini keeps the plain locked one.
     const dragSuffix     = readOnly ? '' : '_drag';
@@ -943,13 +1281,19 @@
     const spec = (window.SimController && window.SimController.spec) || {};
     const pv  = spec.pointValue || 1;
     const lot = spec.lotSize    || 1;
-    // Anchor X for the band overlay's draggable point. We use the
-    // latest bar's timestamp so the handle sits near the chart's
-    // right edge (where the user expects to grab the TP/SL line in
-    // a TradingView-style flow).
+    // Anchor X for the band overlay's draggable point. Defaults to the
+    // MAIN chart's latest bar (getLatestBar()) so the handle sits near
+    // the chart's right edge (TradingView-style). opts.anchorTs
+    // overrides this — required for a multi-timeframe pane, whose own
+    // bar series covers a different (and during replay, possibly much
+    // narrower) time range than the main chart's; anchoring to a
+    // timestamp outside that pane's own data would misplace or fail to
+    // attach the draggable point on that instance.
     const latest = (window.SimController && window.SimController.getLatestBar)
       ? window.SimController.getLatestBar() : null;
-    const anchorTs = latest ? latest.timestamp : null;
+    const anchorTs = Number.isFinite(opts && opts.anchorTs)
+      ? opts.anchorTs
+      : (latest ? latest.timestamp : null);
 
     // ----- Entry lines -------------------------------------------------
     // One per open position. Sync first so it sits BENEATH the bracket
@@ -973,22 +1317,11 @@
         entryIdBy.delete(posId);
       }
     }
-    for (const [posId, info] of wantEntry.entries()) {
-      const points = [{ timestamp: info.ts, value: info.value }];
-      const ext = { side: info.side };
-      const existing = entryIdBy.get(posId);
-      if (existing) {
-        try { chart.overrideOverlay({ id: existing, points, extendData: ext }); }
-        catch (e) { /* ignore */ }
-      } else {
-        try {
-          const espec = { name: 'sim_entry_line', points, extendData: ext };
-          if (readOnly) espec.lock = true;
-          const newId = chart.createOverlay(espec);
-          if (newId) entryIdBy.set(posId, newId);
-        } catch (e) { /* ignore */ }
-      }
-    }
+    // Actually creating/updating the entry-line overlays from wantEntry
+    // is DEFERRED to after the band loop below — that loop is where
+    // rrLabel (R/R text, showLabels-gated) gets computed and stamped
+    // onto each wantEntry entry, reusing the same tp/sl-children lookup
+    // instead of doing it twice.
 
     // ----- Adjusted break-even lines -----------------------------------
     // Mirror the entry-line sync, but only WANT a line for positions whose
@@ -1080,6 +1413,7 @@
             leg, dragging, phase, invalid,
             dim: !!dim,
             usdLabel: fmtUSD(usd),
+            showLabel: showLabels,
             qty: legQty,
             entryPrice: pos.avgEntryPrice,
             entryTs, anchorTs,
@@ -1093,9 +1427,15 @@
       // Committed, render EVERY TP leg as its own band (multi-segment
       // reduce-only brackets) with the leg's own qty — so the user sees
       // "TP1 = 1 lot / TP2 = 1 lot" and the runner's remaining size.
+      // Also tracks the qty-weighted avg |TP - entry| distance (reward)
+      // for the R/R label below — same "average across all TP legs"
+      // formula sim_panel.js's DOM entry ticket uses.
+      let rewardSum = 0, rewardQty = 0, slPriceForRR = null;
       if (drafting && Number.isFinite(ps.tp)) {
         emitBand(`${pos.id}.tp`, 'sim_bracket_band_tp', 'tp', ps.tp, pos.qty,
           !!(ps.draggingLeg === 'tp'), validity.tp === 'invalid');
+        rewardSum = Math.abs(ps.tp - pos.avgEntryPrice) * pos.qty;
+        rewardQty = pos.qty;
       } else if (!drafting) {
         // Nearest-to-entry TP is the ACTIVE target (full opacity); farther
         // TPs are dimmed. As each TP fills its band drops and the next one
@@ -1107,6 +1447,8 @@
         tpChildren.forEach((child, i) => {
           emitBand(`${pos.id}.tp.${child.id}`, 'sim_bracket_band_tp' + dragSuffix, 'tp',
             child.price, child.qty, false, false, child.id, i > 0);
+          rewardSum += Math.abs(child.price - pos.avgEntryPrice) * child.qty;
+          rewardQty += child.qty;
         });
       }
 
@@ -1114,6 +1456,7 @@
       if (drafting && Number.isFinite(ps.sl)) {
         emitBand(`${pos.id}.sl`, 'sim_bracket_band_sl', 'sl', ps.sl, pos.qty,
           !!(ps.draggingLeg === 'sl'), validity.sl === 'invalid');
+        slPriceForRR = ps.sl;
       } else if (!drafting) {
         const slChildren = eng.getPendingOrders().filter(
           o => o.bracketParentId === entryOrder.id && o.type === 'stop');
@@ -1121,6 +1464,40 @@
           emitBand(`${pos.id}.sl.${child.id}`, 'sim_bracket_band_sl' + dragSuffix, 'sl',
             child.stopPrice, child.qty, false, false, child.id);
         }
+        if (slChildren.length) slPriceForRR = slChildren[0].stopPrice;
+      }
+
+      // R/R label on the entry line (showLabels-gated — see the opt's
+      // doc comment above). Needs both legs present, same as the DOM
+      // ticket's rule; qty/pv/lot cancel out of the ratio so raw price
+      // distances are enough.
+      if (showLabels) {
+        const wantEntryInfo = wantEntry.get(pos.id);
+        if (wantEntryInfo && rewardQty > 0 && Number.isFinite(slPriceForRR)) {
+          const reward = rewardSum / rewardQty;
+          const risk = Math.abs(pos.avgEntryPrice - slPriceForRR);
+          const rr = risk > 0 ? reward / risk : 0;
+          wantEntryInfo.rrLabel = rr > 0 ? `R/R ${rr.toFixed(2)}` : null;
+        }
+      }
+    }
+
+    // Create/update the entry-line overlays now that rrLabel (if any)
+    // has been stamped onto each wantEntry entry above.
+    for (const [posId, info] of wantEntry.entries()) {
+      const points = [{ timestamp: info.ts, value: info.value }];
+      const ext = { side: info.side, rrLabel: info.rrLabel || null };
+      const existing = entryIdBy.get(posId);
+      if (existing) {
+        try { chart.overrideOverlay({ id: existing, points, extendData: ext }); }
+        catch (e) { /* ignore */ }
+      } else {
+        try {
+          const espec = { name: 'sim_entry_line', points, extendData: ext };
+          if (readOnly) espec.lock = true;
+          const newId = chart.createOverlay(espec);
+          if (newId) entryIdBy.set(posId, newId);
+        } catch (e) { /* ignore */ }
       }
     }
 
@@ -1176,6 +1553,7 @@
     drop(_bandIdBy);
     drop(_entryLineIdBy);
     drop(_beLineIdBy);
+    drop(_tradeLinkIdBy);
   }
 
   /** Set / clear the preview price for an order. Called by sim_panel
@@ -1192,5 +1570,75 @@
     sync();
   }
 
-  window.SimOverlays = { sync, clearAll, previewOrderPrice, _registerTemplates };
+  /** Console debugging aid: for every trade-arrow event (entry + each
+   *  exit leg) on every position, report — for the MAIN chart and every
+   *  multi-timeframe pane — which bar `_findBarByTimestamp` resolves it
+   *  to (using that chart's own bars, exactly like sync() does) and the
+   *  resulting screen pixel (via that chart's own convertToPixel), side
+   *  by side with the order's raw filledAtBarTs/fillPrice. Run
+   *  `SimOverlays.debugArrows()` in the console (table logged AND
+   *  returned) after placing/closing a trade with multi-pane mode on —
+   *  lets you compare "which K-bar did each pane actually land the
+   *  triangle on" without guessing from screenshots. Read-only: doesn't
+   *  create/touch any overlay. */
+  function debugArrows() {
+    const eng = window.SimController && window.SimController.engine;
+    if (!eng) { console.warn('[SimOverlays.debugArrows] no engine'); return null; }
+    const charts = [];
+    const main = _chart();
+    if (main) charts.push({ label: 'main', chart: main, bars: null }); // null → _findBarByTimestamp's own default resolution
+    const PM = window.PaneManager;
+    if (PM && Array.isArray(PM.panes)) {
+      for (const pane of PM.panes) {
+        if (!pane.chart) continue;
+        charts.push({
+          label: `pane tf=${pane.tf} id=${pane.id}`,
+          chart: pane.chart,
+          bars: pane.chart.getDataList ? pane.chart.getDataList() : null,
+        });
+      }
+    }
+    const rows = [];
+    const describe = (chartInfo, posId, event, order) => {
+      if (!order || !Number.isFinite(order.filledAtBarTs)) return;
+      const bar = _findBarByTimestamp(order.filledAtBarTs, chartInfo.bars);
+      let px = null;
+      if (bar) {
+        try {
+          px = chartInfo.chart.convertToPixel(
+            [{ timestamp: bar.timestamp, value: order.fillPrice }],
+            { paneId: 'candle_pane' }
+          );
+        } catch (e) { /* ignore */ }
+      }
+      rows.push({
+        chart: chartInfo.label,
+        posId, event, orderId: order.id,
+        filledAtBarISO: new Date(order.filledAtBarTs).toISOString(),
+        fillPrice: order.fillPrice,
+        resolvedBarISO: bar ? new Date(bar.timestamp).toISOString() : null,
+        resolvedBarLow: bar ? bar.low : null,
+        resolvedBarHigh: bar ? bar.high : null,
+        pixelX: px && px[0] ? px[0].x : null,
+        pixelY: px && px[0] ? px[0].y : null,
+      });
+    };
+    const allPositions = eng.getPositions().concat(eng.getPositionHistory());
+    for (const pos of allPositions) {
+      const entryOrder = pos.entryOrderIds && pos.entryOrderIds.length
+        ? eng.getOrder(pos.entryOrderIds[0]) : null;
+      for (const c of charts) describe(c, pos.id, 'entry', entryOrder);
+      for (const exId of (pos.exitOrderIds || [])) {
+        const exitOrder = eng.getOrder(exId);
+        for (const c of charts) describe(c, pos.id, 'exit', exitOrder);
+      }
+    }
+    if (console.table) console.table(rows); else console.log(rows);
+    return rows;
+  }
+
+  window.SimOverlays = {
+    sync, clearAll, previewOrderPrice, _registerTemplates, dropPaneMaps,
+    debugArrows,
+  };
 })();

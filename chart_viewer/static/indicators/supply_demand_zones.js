@@ -1028,8 +1028,15 @@
         // Step 3: frame zones + advance lifecycle
         const zones = detectZones(events, seq, dataList, params);
 
-        const pkey = _paneKey(indicator && indicator.paneId);
-        _zonesByPaneKey.set(pkey, zones);
+        // Skip the shared cache write for pane_manager.js's mirrored
+        // multi-timeframe panes — every chart instance defaults to the
+        // same paneId, so a pane's recalc would clobber the main chart's
+        // cached zones out from under event_log.js's getZonesForChart().
+        // See bos_choch.js's calc() for the fuller explanation.
+        if (!ext.__pane_instance) {
+          const pkey = _paneKey(indicator && indicator.paneId);
+          _zonesByPaneKey.set(pkey, zones);
+        }
 
         const out = new Array(dataList.length).fill(null);
         if (out.length > 0) out[0] = { zones };

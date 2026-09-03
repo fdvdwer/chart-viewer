@@ -412,13 +412,50 @@
 
     /** Called by replay.js after each tick. Step-7 will wire this in
      *  replay.js itself; for step 2 it's exposed but not yet called. */
-    onReplayTick() {
+    onReplayTick(preciseTs) {
       const bar = this.getLatestBar();
       // Only mark dirty when a fill happened — pure MAE/MFE bumps are
       // ephemeral (re-derived from closedHistory + bars on reload), no
       // need to PUT every tick or replay would hammer the server.
       let fills = null;
       if (bar) fills = this.engine.processBar(bar);
+      // Sharpen just-filled orders' recorded time to the exact sub-tick
+      // replay.js just processed (preciseTs = that sub-bar's own
+      // timestamp), rather than leaving filledAtBarTs pinned to the
+      // coarse DISPLAY-TF bar's start that processBar matched against.
+      // Whether/which orders fill is untouched (still decided against
+      // the coarse bar — see replay.js's call site comment for why);
+      // this only corrects what gets DISPLAYED as the fill time — trade
+      // history, and multi-timeframe pane arrows, which floor-lookup a
+      // bar by this timestamp and could land up to a full display-bar
+      // early otherwise.
+      if (Array.isArray(fills) && fills.length && Number.isFinite(preciseTs)) {
+        for (const order of fills) order.filledAtBarTs = preciseTs;
+        // A fill that opens or fully closes a position ALSO stamps
+        // pos.openedAtBarTs / pos.closedAtBarTs with the same coarse
+        // bar.timestamp (sim_engine.js's _newPosition /
+        // _applyOrderToPosition) — those live on the POSITION, not the
+        // order, so the loop above never reaches them. sim_overlays.js's
+        // _syncTradeLinks (the entry↔exit connector line) keys off
+        // pos.closedAtBarTs specifically, not the exit order's own
+        // filledAtBarTs, so without this it kept showing the coarse
+        // boundary even after the trade-arrow (which DOES read the
+        // order) was already fixed — the exact "arrow lands on 06:17,
+        // connector line still lands on 06:15" split the user caught.
+        // Guarded to the position's FIRST entry order so a scale-in
+        // add doesn't overwrite the original open time.
+        for (const pos of this.engine.getPositions()) {
+          const firstEntryId = pos.entryOrderIds && pos.entryOrderIds[0];
+          if (firstEntryId != null && fills.some(o => o.id === firstEntryId)) {
+            pos.openedAtBarTs = preciseTs;
+          }
+        }
+        for (const pos of this.engine.getPositionHistory()) {
+          if (pos.exitOrderIds && pos.exitOrderIds.some(id => fills.some(o => o.id === id))) {
+            pos.closedAtBarTs = preciseTs;
+          }
+        }
+      }
       if (Array.isArray(fills) && fills.length) this._markDirty();
       Panel.refresh();
       Overlays.sync();
@@ -475,6 +512,22 @@
       await this.loadForLayout(this._layoutId, newSymbol || 'NQ');
     },
   };
+
+  /** Reference rect for converting a raw mouse Y into a chart price via
+   *  `window.App.chart.convertFromPixel`/`convertToPixel` — those calls
+   *  are relative to the MAIN chart's OWN canvas top, not `#chart-area`'s.
+   *  In single-pane mode the two coincide (#chart fills #chart-area), so
+   *  this was invisible; in multi-pane mode `#pane-layout-bar` sits above
+   *  the pane row, so #chart-area's top is `--sim-pane-top-offset` px
+   *  ABOVE #chart's own top — every drag handler that used chart-area's
+   *  rect.top as the Y origin therefore fed convertFromPixel a Y that
+   *  was too large by that offset (mouse cursor and dragged line drift
+   *  apart vertically by exactly the layout-bar's height). Falls back to
+   *  #chart-area if #chart isn't found (shouldn't happen). */
+  function _dragChartRect() {
+    const el = document.getElementById('chart') || document.getElementById('chart-area');
+    return el.getBoundingClientRect();
+  }
 
   // ------------------------------------------------------------------
   // Panel — DOM-level UI module.
@@ -571,6 +624,42 @@
             if ((parseFloat(q.value) || 0) < v) q.value = String(v);
           }
           this.refresh();
+        });
+      }
+
+      // Entry↔exit connector line toggle (MultiCharts-style, user request):
+      // a dashed line from the entry bar to the exit bar (or to "now" while
+      // still open), colored by side. Lives in the position-tool-settings
+      // popover for discoverability even though it's a display pref, not a
+      // sizing setting — there's no other settings surface for chart
+      // overlays today. Persisted client-side (matches sim.qtyUnit's own
+      // pattern) and applied immediately, no explicit save step needed.
+      const linkCb = document.getElementById('ps-show-trade-link');
+      if (linkCb) {
+        linkCb.checked = this.showTradeLink();
+        linkCb.addEventListener('change', () => {
+          try { localStorage.setItem('sim.showTradeLink', linkCb.checked ? '1' : '0'); } catch (e) {}
+          if (window.SimOverlays && window.SimOverlays.sync) window.SimOverlays.sync();
+        });
+      }
+      // Per-outcome colors (MultiCharts calls these 獲利/虧損 line color —
+      // user wants them user-adjustable, not the fixed by-side green/red
+      // this shipped with first). Same immediate-apply / localStorage
+      // pattern as the checkbox above.
+      const linkWinInp  = document.getElementById('ps-trade-link-win-color');
+      const linkLossInp = document.getElementById('ps-trade-link-loss-color');
+      if (linkWinInp) {
+        linkWinInp.value = this.tradeLinkColor('win');
+        linkWinInp.addEventListener('input', () => {
+          try { localStorage.setItem('sim.tradeLinkWinColor', linkWinInp.value); } catch (e) {}
+          if (window.SimOverlays && window.SimOverlays.sync) window.SimOverlays.sync();
+        });
+      }
+      if (linkLossInp) {
+        linkLossInp.value = this.tradeLinkColor('loss');
+        linkLossInp.addEventListener('input', () => {
+          try { localStorage.setItem('sim.tradeLinkLossColor', linkLossInp.value); } catch (e) {}
+          if (window.SimOverlays && window.SimOverlays.sync) window.SimOverlays.sync();
         });
       }
 
@@ -882,11 +971,22 @@
      *  newly-revealed (or hidden) flex space shows as empty. */
     _resizeChart() {
       const chart = (window.App && window.App.chart) || null;
-      if (chart && chart.resize) {
-        // Defer one frame so the layout has actually reflowed before
-        // we ask the chart to measure itself.
-        requestAnimationFrame(() => { try { chart.resize(); } catch (e) { /* ignore */ } });
-      }
+      // Defer one frame so the layout has actually reflowed before we
+      // ask the charts to measure themselves.
+      requestAnimationFrame(() => {
+        if (chart && chart.resize) { try { chart.resize(); } catch (e) { /* ignore */ } }
+        // Opening/closing the Trade panel resizes #chart-area, which in
+        // multi-pane mode also resizes every extra pane AND shifts pane
+        // 0's right edge — PaneManager._resizeAll() re-measures the pane
+        // charts and recomputes --sim-pane-offset/--sim-pane-top-offset
+        // (see its own doc comment). Without this, those CSS vars stay
+        // stale from before the panel toggled and the entry/TP/SL DOM
+        // ticket rail (positioned via those vars) drifts off pane 0
+        // entirely the next time the panel opens or closes.
+        if (window.PaneManager && window.PaneManager.active && window.PaneManager._resizeAll) {
+          try { window.PaneManager._resizeAll(); } catch (e) { /* ignore */ }
+        }
+      });
     },
 
     setType(type) {
@@ -1173,6 +1273,26 @@
     },
     _setQtyUnit(v) {
       try { localStorage.setItem('sim.qtyUnit', String(v)); } catch (e) { /* ignore */ }
+    },
+
+    /** Whether to draw the entry↔exit connector line (position-tool-
+     *  settings checkbox). Off by default — opt-in visual style. */
+    showTradeLink() {
+      try { return localStorage.getItem('sim.showTradeLink') === '1'; }
+      catch (e) { return false; }
+    },
+    /** User-adjustable connector-line color for the 'win' or 'loss'
+     *  outcome (position-tool-settings color pickers). Defaults match
+     *  chart_viewer's existing S/D-zone green/red so the line looks
+     *  right out of the box before anyone touches the picker. */
+    tradeLinkColor(kind) {
+      const key = kind === 'loss' ? 'sim.tradeLinkLossColor' : 'sim.tradeLinkWinColor';
+      const fallback = kind === 'loss' ? '#ef5350' : '#26a69a';
+      try {
+        const v = localStorage.getItem(key);
+        if (v && /^#[0-9a-fA-F]{6}$/.test(v)) return v;
+      } catch (e) { /* ignore */ }
+      return fallback;
     },
 
     _renderExitLevels(pos) {
@@ -1723,7 +1843,7 @@
         onMove = (ev) => {
           const chart = (window.App && window.App.chart) || null;
           if (!chart || !chart.convertFromPixel || !chartArea) return;
-          const rect = chartArea.getBoundingClientRect();
+          const rect = _dragChartRect();
           const y = ev.clientY - rect.top;
           try {
             const pt = chart.convertFromPixel({ x: 0, y }, { paneId: 'candle_pane' });
@@ -1815,7 +1935,7 @@
         onMove = (ev) => {
           const chart = (window.App && window.App.chart) || null;
           if (!chart || !chart.convertFromPixel) return;
-          const rect = chartArea.getBoundingClientRect();
+          const rect = _dragChartRect();
           const y = ev.clientY - rect.top;
           try {
             const pt = chart.convertFromPixel(
@@ -1975,7 +2095,7 @@
     _updateLegDropPrice(leg, evt, tickSize, chartArea) {
       const chart = (window.App && window.App.chart) || null;
       if (!chart || !chart.convertFromPixel) return;
-      const rect = chartArea.getBoundingClientRect();
+      const rect = _dragChartRect();
       // Clamp to pane bounds so dragging above/below the chart still
       // resolves to a price (the topmost / bottommost visible row).
       const y = Math.max(0, Math.min(rect.height, evt.clientY - rect.top));
@@ -2216,7 +2336,7 @@
         onMove = (ev) => {
           const chart = (window.App && window.App.chart) || null;
           if (!chart || !chart.convertFromPixel) return;
-          const rect = chartArea.getBoundingClientRect();
+          const rect = _dragChartRect();
           const y = ev.clientY - rect.top;
           try {
             const pt = chart.convertFromPixel(
@@ -2434,7 +2554,7 @@
       const onMove = (ev) => {
         const chart = (window.App && window.App.chart) || null;
         if (!chart || !chart.convertFromPixel) return;
-        const rect = chartArea.getBoundingClientRect();
+        const rect = _dragChartRect();
         const y = ev.clientY - rect.top;
         try {
           const pt = chart.convertFromPixel({ x: 0, y }, { paneId: 'candle_pane' });

@@ -52,8 +52,12 @@ function _ohlcTooltipCustom() {
 }
 
 // ----- Init -----
-function initChart() {
-  const chart = klinecharts.init('chart', {
+// containerId lets pane_manager.js build extra same-styled chart
+// instances for the multi-timeframe pane feature; App.chart / the i18n
+// listener are only wired for the default 'chart' container so the
+// single-pane (today's) behaviour is completely unchanged.
+function initChart(containerId = 'chart') {
+  const chart = klinecharts.init(containerId, {
     locale: _klineLocale(),
     timezone: DISPLAY_TZ,
     styles: {
@@ -109,23 +113,25 @@ function initChart() {
     { id: 'pane_vol', height: 90, dragEnabled: false }
   );
 
-  App.chart = chart;
+  if (containerId === 'chart') {
+    App.chart = chart;
 
-  // Spec i18n §4.3: flip KLineChart's built-in locale (axis tooltip,
-  // crosshair time format) AND our custom OHLCV tooltip labels when
-  // the user toggles language. Idempotent guard avoids stacking on
-  // hot-reload / re-init.
-  if (!App._chartI18nWired) {
-    App._chartI18nWired = true;
-    document.addEventListener('i18n:change', () => {
-      if (!App.chart) return;
-      try { App.chart.setLocale(_klineLocale()); } catch (e) {}
-      try {
-        App.chart.setStyles({
-          candle: { tooltip: { custom: _ohlcTooltipCustom() } },
-        });
-      } catch (e) {}
-    });
+    // Spec i18n §4.3: flip KLineChart's built-in locale (axis tooltip,
+    // crosshair time format) AND our custom OHLCV tooltip labels when
+    // the user toggles language. Idempotent guard avoids stacking on
+    // hot-reload / re-init.
+    if (!App._chartI18nWired) {
+      App._chartI18nWired = true;
+      document.addEventListener('i18n:change', () => {
+        if (!App.chart) return;
+        try { App.chart.setLocale(_klineLocale()); } catch (e) {}
+        try {
+          App.chart.setStyles({
+            candle: { tooltip: { custom: _ohlcTooltipCustom() } },
+          });
+        } catch (e) {}
+      });
+    }
   }
 
   return chart;
@@ -407,6 +413,10 @@ const NO_SUFFIX_KEY = 'dlg.tfMinute';
 
 const TfInput = {
   buffer: '',                 // raw text e.g. "15h"
+  // null = commit goes to the main chart (loadTimeframe), same as
+  // always. { paneId } = commit goes to that pane_manager.js pane
+  // instead — set by App.openTfPopupForPane, cleared on hide/commit.
+  target: null,
 };
 
 function isFormFocused() {
@@ -418,10 +428,32 @@ function isFormFocused() {
 function tfPopupShow() {
   document.getElementById('tf-popup').classList.remove('hidden');
 }
+// Open the SAME popup used for the main chart's keyboard-driven TF entry,
+// but targeted at an extra pane (pane_manager.js) — reused so panes get
+// identical "type digits + unit letter, Enter commits" behaviour instead
+// of a separate bespoke widget. The existing global keydown listener
+// below (digit/unit/Enter/Escape/Backspace) drives the buffer either way;
+// only tfCommit()'s destination differs based on TfInput.target.
+function openTfPopupForPane(paneId) {
+  TfInput.target = { paneId };
+  TfInput.buffer = '';
+  tfPopupShow();
+  tfPopupRender();
+  _syncPaneHighlight();
+}
 function tfPopupHide() {
   document.getElementById('tf-popup').classList.add('hidden');
   document.getElementById('tf-popup').classList.remove('invalid');
   TfInput.buffer = '';
+  TfInput.target = null;
+  _syncPaneHighlight();
+}
+// Outline whichever pane the popup is currently targeting (no-op / no
+// visible change when the target is the main chart or PaneManager
+// isn't loaded) so it's unambiguous which pane is about to change TF.
+function _syncPaneHighlight() {
+  if (!window.PaneManager || !window.PaneManager.highlightPane) return;
+  window.PaneManager.highlightPane(TfInput.target ? TfInput.target.paneId : null);
 }
 function tfPopupRender() {
   const buf = TfInput.buffer;
@@ -454,7 +486,12 @@ function tfCommit() {
   if (m) {
     // Pass buffer as-is: "15" stays "15" (minutes), "15m" stays "15m" (month)
     const tf = (m[1] + (m[2] || '').toLowerCase());
-    loadTimeframe(tf);
+    const target = TfInput.target;
+    if (target && target.paneId != null && window.PaneManager) {
+      window.PaneManager.setPaneTf(target.paneId, tf);
+    } else {
+      loadTimeframe(tf);
+    }
     tfPopupHide();
   }
 }
@@ -503,9 +540,20 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.altKey || e.metaKey) return;
   if (e.isComposing) return;             // IME composing — ignore
 
-  // Digit → open TF popup
+  // Digit → open TF popup. On a FRESH open (popup wasn't already showing —
+  // once open, the target is locked for the rest of this entry), target
+  // whichever pane the mouse is currently over, or the main chart if
+  // hovering it / nowhere pane-related. This is what makes "just type a
+  // number" work per-pane without clicking anything first, same as the
+  // main chart has always worked with a single chart.
   const digit = getDigitFromEvent(e);
   if (digit !== null) {
+    if (!isTfPopupOpen()) {
+      const hoveredPaneId = window.PaneManager ? window.PaneManager.getHoveredPaneId() : null;
+      TfInput.target = hoveredPaneId != null ? { paneId: hoveredPaneId } : null;
+      TfInput.buffer = '';
+      _syncPaneHighlight();
+    }
     TfInput.buffer += digit;
     tfPopupShow();
     tfPopupRender();
@@ -2145,5 +2193,11 @@ window.addEventListener('DOMContentLoaded', async () => {
 App.loadTimeframe = loadTimeframe;
 App.switchSymbol = switchSymbol;
 App.openLayout = openLayout;
+// Reused by pane_manager.js to build extra same-styled chart instances
+// for the multi-timeframe pane feature without duplicating chart setup.
+App.initChart = initChart;
+App.fetchOHLCV = fetchOHLCV;
+App.formatTfDisplay = formatTfDisplay;
+App.openTfPopupForPane = openTfPopupForPane;
 App.Layouts = Layouts;
 App.schedulePersistLayoutState = schedulePersistLayoutState;

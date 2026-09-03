@@ -534,7 +534,11 @@
         };
         const pivots = _buildPivots(dataList, params);
         const res = detect(dataList, pivots, params);
-        _byPane.set(_paneKey(indicator && indicator.paneId), res);
+        // Skip the shared cache write for pane_manager.js's mirrored
+        // multi-timeframe panes — see bos_choch.js's calc() for why.
+        if (!ext.__pane_instance) {
+          _byPane.set(_paneKey(indicator && indicator.paneId), res);
+        }
 
         // Optional: frame supply/demand zones from THIS structure, reusing the
         // Supply/Demand indicator's pipeline (no duplication). Sealed structure

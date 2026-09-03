@@ -520,7 +520,11 @@
           trend_mode:          cp[9] ?? ext.trend_mode         ?? DEFAULT_PARAMS.trend_mode,
         };
         const events = detectSpanEvents(dataList, params);
-        _eventsByPaneKey.set(_paneKey(indicator && indicator.paneId), events);
+        // Skip the shared cache write for pane_manager.js's mirrored
+        // multi-timeframe panes — see bos_choch.js's calc() for why.
+        if (!ext.__pane_instance) {
+          _eventsByPaneKey.set(_paneKey(indicator && indicator.paneId), events);
+        }
         const out = new Array(dataList.length).fill(null);
         if (out.length > 0) out[0] = { events };
         return out;

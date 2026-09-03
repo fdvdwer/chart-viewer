@@ -157,6 +157,14 @@
       </svg>
       <span>級別</span>
     </button>
+    <button class="topbar-btn" id="btn-multipane" data-i18n-title="topbar.multiPaneTooltip" title="多頻率視圖">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="8" height="18" rx="1"/>
+        <rect x="13" y="3" width="8" height="8" rx="1"/>
+        <rect x="13" y="13" width="8" height="8" rx="1"/>
+      </svg>
+      <span data-i18n="topbar.multiPane">多頻率</span>
+    </button>
     <button class="topbar-btn" id="btn-layouts" data-i18n-title="topbar.layoutsTooltip" title="版面">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
         <rect x="3" y="3" width="7" height="7"/>
@@ -459,7 +467,38 @@
 
   <!-- Chart -->
   <div id="chart-area">
-    <div id="chart"></div>
+    <!-- ========== Multi-timeframe pane layout bar (pane_manager.js) ==========
+         Hidden until the user turns on multi-pane mode (topbar "多頻率視圖"
+         button). Lets the user pick a 3-pane arrangement and add/remove
+         panes; each extra pane gets its own TF selector inside its cell. -->
+    <div id="pane-layout-bar" class="pane-layout-bar" hidden>
+      <span class="pane-layout-label" data-i18n="panes.layoutLabel">版面：</span>
+      <button class="pane-layout-opt" data-layout="cols3" data-i18n-title="panes.layoutCols3" title="三等分">
+        <svg width="30" height="20" viewBox="0 0 46 30"><rect x="0.5" y="0.5" width="13.7" height="29" rx="2"/><rect x="16" y="0.5" width="13.7" height="29" rx="2"/><rect x="31.5" y="0.5" width="13.7" height="29" rx="2"/></svg>
+      </button>
+      <button class="pane-layout-opt" data-layout="mainstack" data-i18n-title="panes.layoutMainstack" title="主圖＋側欄">
+        <svg width="30" height="20" viewBox="0 0 46 30"><rect x="0.5" y="0.5" width="28" height="29" rx="2"/><rect x="30.5" y="0.5" width="15" height="13.7" rx="2"/><rect x="30.5" y="15.8" width="15" height="13.7" rx="2"/></svg>
+      </button>
+      <button class="pane-layout-opt" data-layout="quad" data-i18n-title="panes.layoutQuad" title="2×2 四宮格">
+        <svg width="30" height="20" viewBox="0 0 46 30"><rect x="0.5" y="0.5" width="22" height="13.7" rx="2"/><rect x="23.5" y="0.5" width="22" height="13.7" rx="2"/><rect x="0.5" y="15.8" width="22" height="13.7" rx="2"/><rect x="23.5" y="15.8" width="22" height="13.7" rx="2"/></svg>
+      </button>
+      <div class="pane-layout-spacer"></div>
+      <button class="pane-layout-add" id="pane-add-btn" data-i18n="panes.addPane">+ 新增面板</button>
+      <button class="pane-layout-exit" id="pane-exit-btn" data-i18n-title="common.close" title="關閉多視圖">✕</button>
+    </div>
+
+    <!-- ========== Pane row (pane_manager.js) ==========
+         Pane 0 is always the existing #chart (main chart) — all drawing
+         tools, persistence and the trade-ticket overlays stay bound to
+         it exactly as before. Extra panes (own KLineChart instance, own
+         TF) are appended as sibling .pane-cell elements when multi-pane
+         mode is on; .pane-row switches from a single flex item to a
+         CSS grid via [data-layout]. Single-pane default is byte-identical
+         in layout to the old bare <div id="chart"> (no wrapper regression
+         for #chart-area's absolutely-positioned children below). -->
+    <div id="pane-row" class="pane-row" data-layout="single">
+      <div id="chart" data-pane="0"></div>
+    </div>
 
     <!-- ========== Mini chart (branching-replay-spec §5.4) ==========
          Compact secondary chart below the main chart. Shows the
@@ -1886,6 +1925,18 @@
       <option value="" data-i18n="panel.position.toolSymbolAuto">自動偵測</option>
     </select>
   </div>
+  <div class="row ps-row-checkbox">
+    <label data-i18n="panel.position.toolShowTradeLink">顯示進出場連接線</label>
+    <input type="checkbox" id="ps-show-trade-link">
+  </div>
+  <div class="row ps-row-color">
+    <label data-i18n="panel.position.toolLinkWinColor">獲利線條色彩</label>
+    <input type="color" id="ps-trade-link-win-color">
+  </div>
+  <div class="row ps-row-color">
+    <label data-i18n="panel.position.toolLinkLossColor">虧損線條色彩</label>
+    <input type="color" id="ps-trade-link-loss-color">
+  </div>
   <div class="ps-actions">
     <button type="button" id="ps-reset" class="ps-link" data-i18n="panel.position.toolReset">重設預設值</button>
     <button type="button" id="ps-save" class="btn-primary" data-i18n="common.save">儲存</button>
@@ -1926,6 +1977,7 @@
 <script src="indicator_library.js"></script>
 <script src="indicator_manager.js"></script>
 <script src="app.js"></script>
+<script src="pane_manager.js"></script>
 
 <!-- ========== Trade history drawer (sim_history.js) ==========
      NOTE: this element is moved INTO #chart-area at runtime by
